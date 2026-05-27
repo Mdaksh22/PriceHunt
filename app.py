@@ -311,7 +311,7 @@ def identify_from_image(client, image_bytes: bytes) -> dict:
 }
 Groceries/food/beverages → grocery_stores. Electronics/gadgets → electronics_stores."""
     response = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="gemini-2.0-flash",
         contents=[types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
                   types.Part.from_text(text=prompt)]
     )
@@ -334,7 +334,7 @@ Return ONLY a raw JSON object, no markdown:
   "store_category": "grocery_stores or electronics_stores"
 }}
 If category is Grocery/Food → grocery_stores. If Electronics/Gadgets → electronics_stores. Else infer from name."""
-    response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
+    response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.text.strip())
     m = re.search(r'\{.*\}', raw, re.DOTALL)
     return json.loads(m.group(0) if m else raw)
@@ -361,7 +361,7 @@ def gemini_fallback(client, product: dict, stores: list) -> list:
 Stores: {', '.join(stores)}. Return ONLY a JSON array (no markdown):
 [{{"site":"StoreName","price":299,"link":"https://...","estimated":true}}]
 Realistic INR prices. Only stores that carry this product."""
-    response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
+    response = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.text.strip())
     m = re.search(r'\[.*\]', raw, re.DOTALL)
     return json.loads(m.group(0) if m else raw)
