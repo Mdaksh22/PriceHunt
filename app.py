@@ -205,12 +205,20 @@ def ai_call(client: OpenAI, messages: list, model: str = None, is_vision: bool =
     for m in fallback_list:
         try:
             resp = client.chat.completions.create(model=m, messages=messages, max_tokens=1200)
-            return resp.choices[0].message.content.strip()
+            # Guard against models that return empty/null choices or content
+            if not resp or not resp.choices:
+                last_error = Exception(f"Model {m} returned empty response")
+                continue
+            content = resp.choices[0].message.content
+            if content is None:
+                last_error = Exception(f"Model {m} returned null content")
+                continue
+            return content.strip()
         except Exception as e:
             last_error = e
             err_str = str(e)
-            # If rate-limited (429) or model not found (404), try next model
-            if "429" in err_str or "404" in err_str:
+            # If rate-limited (429), model not found (404), or subscript error, try next model
+            if "429" in err_str or "404" in err_str or "NoneType" in err_str:
                 time.sleep(0.5)
                 continue
             else:
@@ -471,7 +479,7 @@ def main():
                     label_visibility="collapsed"
                 )
             st.markdown("""
-<div style="margin-top:0.4rem;">
+<div style="margin-top:0.4rem; margin-bottom:1.2rem;">
   <span class="ph-chip">🥥 Coconut Water</span>
   <span class="ph-chip">🍜 Maggi Noodles</span>
   <span class="ph-chip">💻 HP Victus Laptop</span>
