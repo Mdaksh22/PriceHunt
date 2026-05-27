@@ -154,8 +154,8 @@ div[role="radiogroup"] label { color: #44403c !important; }
 # ── OpenRouter config ─────────────────────────────────────────────────────────
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 # Free models on OpenRouter (vision-capable)
-VISION_MODEL   = "google/gemini-2.0-flash-exp:free"
-TEXT_MODEL     = "google/gemini-2.0-flash-exp:free"  # same model, also great for text
+VISION_MODEL   = "google/gemma-4-31b-it:free"
+TEXT_MODEL     = "google/gemma-4-31b-it:free"  # same model, also great for text
 
 # ── Store lists ───────────────────────────────────────────────────────────────
 GROCERY_STORES    = ["Zepto", "Blinkit", "Swiggy Instamart", "BigBasket", "JioMart", "DMart Online"]
