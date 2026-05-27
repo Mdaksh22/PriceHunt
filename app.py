@@ -457,19 +457,20 @@ def main():
     text_query, uploaded_file, category = None, None, "Auto-detect"
 
     if mode == "📝 Type product name":
-        c1, c2 = st.columns([3, 1])
-        with c1:
-            text_query = st.text_input(
-                "product",
-                placeholder="e.g.  Tropicana Orange Juice 1L  or  HP Victus i5 Laptop",
-                label_visibility="collapsed"
-            )
-        with c2:
-            category = st.selectbox("cat",
-                ["Auto-detect", "Grocery / Food", "Electronics / Gadgets"],
-                label_visibility="collapsed"
-            )
-        st.markdown("""
+        with st.form("search_form", clear_on_submit=False):
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                text_query = st.text_input(
+                    "product",
+                    placeholder="e.g.  Tropicana Orange Juice 1L  or  HP Victus i5 Laptop",
+                    label_visibility="collapsed"
+                )
+            with c2:
+                category = st.selectbox("cat",
+                    ["Auto-detect", "Grocery / Food", "Electronics / Gadgets"],
+                    label_visibility="collapsed"
+                )
+            st.markdown("""
 <div style="margin-top:0.4rem;">
   <span class="ph-chip">🥥 Coconut Water</span>
   <span class="ph-chip">🍜 Maggi Noodles</span>
@@ -477,6 +478,8 @@ def main():
   <span class="ph-chip">📱 Samsung Galaxy S24</span>
   <span class="ph-chip">🧴 Dove Shampoo 650ml</span>
 </div>""", unsafe_allow_html=True)
+            go = st.form_submit_button("🔍 Find Best Prices", use_container_width=True)
+        can_search = bool(text_query and text_query.strip()) and go
     else:
         c1, c2 = st.columns([1, 1])
         with c1:
@@ -487,10 +490,10 @@ def main():
         with c2:
             if uploaded_file:
                 st.image(Image.open(uploaded_file), use_container_width=True)
-
-    st.markdown("")
-    can_search = bool(text_query and text_query.strip()) or bool(uploaded_file)
-    go = st.button("🔍 Find Best Prices", disabled=not can_search, use_container_width=True)
+        st.markdown("")
+        can_search = bool(uploaded_file)
+        go = st.button("🔍 Find Best Prices", disabled=not can_search, use_container_width=True)
+        can_search = can_search and go
 
     if not can_search:
         st.markdown('<hr class="ph-hr">', unsafe_allow_html=True)
@@ -513,8 +516,7 @@ def main():
 </div>""", unsafe_allow_html=True)
         return
 
-    if not go:
-        return
+
 
     # ── Identify product ───────────────────────────────────────────────────────
     st.markdown('<hr class="ph-hr">', unsafe_allow_html=True)
