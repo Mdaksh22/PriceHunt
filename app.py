@@ -177,7 +177,7 @@ def make_client(api_key: str) -> OpenAI:
 
 def ai_call(client: OpenAI, messages: list, model: str = TEXT_MODEL) -> str:
     """Call OpenRouter API, returns response text."""
-    resp = client.chat.completions.create(model=model, messages=messages, max_tokens=600)
+    resp = client.chat.completions.create(model=model, messages=messages, max_tokens=1200)
     return resp.choices[0].message.content.strip()
 
 
@@ -214,10 +214,15 @@ def extract_price(text: str):
 
 
 def parse_json_response(raw: str, is_array: bool = False):
-    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
+    # Strip markdown code fences (```json ... ```) — handle various whitespace
+    cleaned = re.sub(r'```(?:json)?\s*\n?', '', raw.strip())
+    cleaned = cleaned.strip()
     pattern = r'\[.*\]' if is_array else r'\{.*\}'
-    m = re.search(pattern, raw, re.DOTALL)
-    return json.loads(m.group(0) if m else raw)
+    m = re.search(pattern, cleaned, re.DOTALL)
+    if m:
+        return json.loads(m.group(0))
+    # Last resort: try loading the whole cleaned string
+    return json.loads(cleaned)
 
 
 # ── AI: Identify product from IMAGE ──────────────────────────────────────────
@@ -269,13 +274,19 @@ If category is Grocery/Food → grocery_stores. If Electronics/Gadgets → elect
 
 # ── AI: Fallback estimated prices ────────────────────────────────────────────
 def ai_price_fallback(client: OpenAI, product: dict, stores: list) -> list:
-    prompt = f"""Indian e-commerce pricing expert.
-Product: {product['name']} {product.get('variant', '')}
-Stores: {', '.join(stores)}
+    prompt = f"""You are an Indian e-commerce pricing expert. I need realistic current INR prices.
 
-Return ONLY a JSON array (no markdown):
+Product: {product['name']} {product.get('variant', '')}
+Stores to check: {', '.join(stores)}
+
+IMPORTANT: Respond with ONLY a raw JSON array, no explanation, no markdown fences:
 [{{"site":"StoreName","price":299,"link":"https://store.com/search?q=product","estimated":true}}]
-Use realistic current INR prices. Only include stores that carry this product."""
+
+Rules:
+- Use realistic current Indian market prices in INR (numbers only, no currency symbol)
+- Generate a proper search URL for each store
+- Set "estimated" to true for all entries
+- Include at least 3 stores"""
 
     raw = ai_call(client, [{"role": "user", "content": prompt}])
     return parse_json_response(raw, is_array=True)
@@ -319,9 +330,22 @@ def fetch_prices(client: OpenAI, product: dict) -> list:
             have = {r["site"] for r in results if r.get("price")}
             for f in fb:
                 if f.get("site") not in have and f.get("price"):
+                    f["estimated"] = True
+                    # Ensure link exists
+                    if not f.get("link"):
+                        f["link"] = build_search_url(f["site"], product["search_query"])
                     results.append(f)
-        except Exception:
-            pass
+        except Exception as e:
+            st.warning(f"⚠️ AI estimate failed: {e}")
+            # Last-resort fallback: generate basic estimated results so user isn't left empty
+            query = product.get("search_query", product.get("name", ""))
+            for store in stores[:4]:
+                results.append({
+                    "site": store,
+                    "price": None,
+                    "link": build_search_url(store, query),
+                    "estimated": True,
+                })
 
     priced = sorted([r for r in results if r.get("price")], key=lambda x: x["price"])
     return priced[:6]
