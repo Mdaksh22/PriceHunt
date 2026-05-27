@@ -153,9 +153,27 @@ div[role="radiogroup"] label { color: #44403c !important; }
 
 # ── OpenRouter config ─────────────────────────────────────────────────────────
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-# Free models on OpenRouter (vision-capable)
-VISION_MODEL   = "google/gemma-4-31b-it:free"
-TEXT_MODEL     = "google/gemma-4-31b-it:free"  # same model, also great for text
+
+# Free models — ordered by preference. If one is rate-limited (429), we try the next.
+# Vision-capable free models (support image input)
+VISION_MODELS = [
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+]
+# Text-only free models (larger selection, used for text queries & price estimates)
+TEXT_MODELS = [
+    "deepseek/deepseek-v4-flash:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "google/gemma-4-31b-it:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen3-coder:free",
+]
+
+# Legacy aliases for compatibility
+VISION_MODEL = VISION_MODELS[0]
+TEXT_MODEL = TEXT_MODELS[0]
 
 # ── Store lists ───────────────────────────────────────────────────────────────
 GROCERY_STORES    = ["Zepto", "Blinkit", "Swiggy Instamart", "BigBasket", "JioMart", "DMart Online"]
@@ -175,10 +193,30 @@ def make_client(api_key: str) -> OpenAI:
     return OpenAI(base_url=OPENROUTER_BASE, api_key=api_key)
 
 
-def ai_call(client: OpenAI, messages: list, model: str = TEXT_MODEL) -> str:
-    """Call OpenRouter API, returns response text."""
-    resp = client.chat.completions.create(model=model, messages=messages, max_tokens=1200)
-    return resp.choices[0].message.content.strip()
+def ai_call(client: OpenAI, messages: list, model: str = None, is_vision: bool = False) -> str:
+    """Call OpenRouter API with automatic model fallback on 429 rate limits."""
+    # Build the list of models to try
+    if model:
+        fallback_list = [model]
+    else:
+        fallback_list = list(VISION_MODELS if is_vision else TEXT_MODELS)
+
+    last_error = None
+    for m in fallback_list:
+        try:
+            resp = client.chat.completions.create(model=m, messages=messages, max_tokens=1200)
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            last_error = e
+            err_str = str(e)
+            # If rate-limited (429) or model not found (404), try next model
+            if "429" in err_str or "404" in err_str:
+                time.sleep(0.5)
+                continue
+            else:
+                raise  # Other errors (auth, etc.) should bubble up immediately
+
+    raise last_error or Exception("All free models are currently rate-limited. Please try again in a minute.")
 
 
 def build_search_url(store: str, q: str) -> str:
@@ -248,7 +286,7 @@ Groceries/food/beverages/household → grocery_stores. Electronics/gadgets/appli
             {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
             {"type": "text", "text": prompt}
         ]}
-    ], model=VISION_MODEL)
+    ], is_vision=True)
     return parse_json_response(raw)
 
 
@@ -268,7 +306,7 @@ Return ONLY a raw JSON object, no markdown:
 }}
 If category is Grocery/Food → grocery_stores. If Electronics/Gadgets → electronics_stores. Else infer from product name."""
 
-    raw = ai_call(client, [{"role": "user", "content": prompt}])
+    raw = ai_call(client, [{"role": "user", "content": prompt}])  # uses TEXT_MODELS fallback
     return parse_json_response(raw)
 
 
@@ -288,7 +326,7 @@ Rules:
 - Set "estimated" to true for all entries
 - Include at least 3 stores"""
 
-    raw = ai_call(client, [{"role": "user", "content": prompt}])
+    raw = ai_call(client, [{"role": "user", "content": prompt}])  # uses TEXT_MODELS fallback
     return parse_json_response(raw, is_array=True)
 
 
