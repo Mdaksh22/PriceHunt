@@ -247,20 +247,43 @@ def build_search_url(store: str, q: str) -> str:
 
 
 def extract_price(text: str):
-    for pat in [r'₹\s*([\d,]+(?:\.\d{1,2})?)', r'Rs\.?\s*([\d,]+)', r'INR\s*([\d,]+)']:
+    """Extract the first valid INR price from text."""
+    patterns = [
+        r'₹\s*([\d,]+(?:\.\d{1,2})?)',
+        r'Rs\.?\s*([\d,]+(?:\.\d{1,2})?)',
+        r'INR\s*([\d,]+(?:\.\d{1,2})?)',
+        r'MRP[:\s]*₹?\s*([\d,]+(?:\.\d{1,2})?)',
+        r'"price"\s*:\s*"?([\d,.]+)',
+        r'"selling_price"\s*:\s*"?([\d,.]+)',
+        r'"special_price"\s*:\s*"?([\d,.]+)',
+    ]
+    for pat in patterns:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
             try:
                 p = float(m.group(1).replace(",", ""))
-                if 1 < p < 1_000_000:
+                if 10 < p < 10_000_000:
                     return p
             except ValueError:
                 pass
     return None
 
 
+def extract_all_prices(text: str) -> list:
+    """Extract ALL valid INR prices from text, return sorted unique list."""
+    prices = []
+    for pat in [r'₹\s*([\d,]+(?:\.\d{1,2})?)', r'Rs\.?\s*([\d,]+)', r'"price"\s*:\s*"?([\d,.]+)']:
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            try:
+                p = float(m.group(1).replace(",", ""))
+                if 10 < p < 10_000_000:
+                    prices.append(p)
+            except ValueError:
+                pass
+    return sorted(set(prices))
+
+
 def parse_json_response(raw: str, is_array: bool = False):
-    # Strip markdown code fences (```json ... ```) — handle various whitespace
     cleaned = re.sub(r'```(?:json)?\s*\n?', '', raw.strip())
     cleaned = cleaned.strip()
     pattern = r'\[.*\]' if is_array else r'\{.*\}'
@@ -318,88 +341,165 @@ If category is Grocery/Food → grocery_stores. If Electronics/Gadgets → elect
     return parse_json_response(raw)
 
 
-# ── AI: Fallback estimated prices ────────────────────────────────────────────
-def ai_price_fallback(client: OpenAI, product: dict, stores: list) -> list:
-    prompt = f"""You are an Indian e-commerce pricing expert. I need realistic current INR prices.
+# ── Web Scraping: Direct store price lookup ──────────────────────────────────
+try:
+    import requests as _requests
+    from bs4 import BeautifulSoup as _BS
+    HAS_SCRAPING = True
+except ImportError:
+    HAS_SCRAPING = False
 
-Product: {product['name']} {product.get('variant', '')}
-Stores to check: {', '.join(stores)}
-
-IMPORTANT: Respond with ONLY a raw JSON array, no explanation, no markdown fences:
-[{{"site":"StoreName","price":299,"link":"https://store.com/search?q=product","estimated":true}}]
-
-Rules:
-- Use realistic current Indian market prices in INR (numbers only, no currency symbol)
-- Generate a proper search URL for each store
-- Set "estimated" to true for all entries
-- Include at least 3 stores"""
-
-    raw = ai_call(client, [{"role": "user", "content": prompt}])  # uses TEXT_MODELS fallback
-    return parse_json_response(raw, is_array=True)
+SCRAPE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
 
 
-# ── Search: DuckDuckGo price lookup ──────────────────────────────────────────
-def search_store_price(ddgs, store: str, query: str) -> dict:
+def _scrape_amazon(query: str) -> dict | None:
+    if not HAS_SCRAPING:
+        return None
+    try:
+        url = f"https://www.amazon.in/s?k={urllib.parse.quote_plus(query)}"
+        resp = _requests.get(url, headers=SCRAPE_HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return None
+        soup = _BS(resp.text, "html.parser")
+        for sel in ["span.a-price span.a-offscreen", "span.a-price-whole", "span.a-color-price"]:
+            el = soup.select_one(sel)
+            if el:
+                price = extract_price(el.get_text())
+                if price:
+                    card = el.find_parent("div", {"data-component-type": "s-search-result"})
+                    link = url
+                    if card:
+                        a_tag = card.select_one("h2 a")
+                        if a_tag and a_tag.get("href"):
+                            link = "https://www.amazon.in" + a_tag["href"]
+                    return {"site": "Amazon India", "price": price, "link": link, "estimated": False}
+    except Exception:
+        pass
+    return None
+
+
+def _scrape_flipkart(query: str) -> dict | None:
+    if not HAS_SCRAPING:
+        return None
+    try:
+        url = f"https://www.flipkart.com/search?q={urllib.parse.quote_plus(query)}"
+        resp = _requests.get(url, headers=SCRAPE_HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return None
+        soup = _BS(resp.text, "html.parser")
+        for el in soup.find_all(string=re.compile(r'₹[\d,]+')):
+            price = extract_price(str(el))
+            if price:
+                parent_a = el.find_parent("a")
+                link = url
+                if parent_a and parent_a.get("href"):
+                    href = parent_a["href"]
+                    link = href if href.startswith("http") else "https://www.flipkart.com" + href
+                return {"site": "Flipkart", "price": price, "link": link, "estimated": False}
+        prices = extract_all_prices(resp.text)
+        if prices:
+            return {"site": "Flipkart", "price": prices[0], "link": url, "estimated": False}
+    except Exception:
+        pass
+    return None
+
+
+def _scrape_generic(store: str, query: str) -> dict | None:
+    """Fetch store search page and regex for prices in HTML/JSON."""
+    if not HAS_SCRAPING:
+        return None
+    try:
+        url = build_search_url(store, query)
+        resp = _requests.get(url, headers=SCRAPE_HEADERS, timeout=8, allow_redirects=True)
+        if resp.status_code != 200:
+            return None
+        prices = extract_all_prices(resp.text)
+        if prices:
+            return {"site": store, "price": prices[0], "link": url, "estimated": False}
+    except Exception:
+        pass
+    return None
+
+
+STORE_SCRAPERS = {
+    "Amazon India": _scrape_amazon,
+    "Flipkart": _scrape_flipkart,
+}
+
+
+# ── DuckDuckGo search (fallback) ────────────────────────────────────────────
+def _ddg_store_price(ddgs, store: str, query: str) -> dict:
     domain = STORE_DOMAINS.get(store, "")
-    for q in [f'site:{domain} {query} price', f'{query} price {store} India']:
+    queries = [
+        f'site:{domain} {query} price',
+        f'{query} price {store} India',
+        f'buy {query} {store} ₹',
+        f'{query} {store} MRP India',
+    ]
+    for q in queries:
         try:
-            for r in ddgs.text(q, max_results=6):
-                price = extract_price(r.get("body", "") + " " + r.get("title", ""))
+            for r in ddgs.text(q, max_results=10):
+                combined = f"{r.get('title', '')} {r.get('body', '')} {r.get('href', '')}"
+                price = extract_price(combined)
                 if price:
                     url = r.get("href", "")
                     if not url or domain not in url:
                         url = build_search_url(store, query)
                     return {"site": store, "price": price, "link": url, "estimated": False}
         except Exception:
-            time.sleep(0.4)
+            time.sleep(0.3)
     return {"site": store, "price": None, "link": build_search_url(store, query), "estimated": False}
 
 
-def fetch_prices(client: OpenAI, product: dict) -> list:
+# ── Main price fetcher ───────────────────────────────────────────────────────
+def fetch_prices(product: dict) -> list:
+    """Fetch real prices via web scraping + DuckDuckGo. No AI estimates."""
     stores = GROCERY_STORES if product.get("store_category") == "grocery_stores" else ELECTRONICS_STORES
-    results, live_count = [], 0
+    query = product.get("search_query", product.get("name", ""))
+    results = []
     bar = st.progress(0, text="Searching stores…")
-    with DDGS() as ddgs:
-        for i, store in enumerate(stores):
-            bar.progress((i + 1) / len(stores), text=f"Checking {store}…")
-            r = search_store_price(ddgs, store, product["search_query"])
-            results.append(r)
-            if r.get("price"):
-                live_count += 1
-            time.sleep(0.35)
-    bar.empty()
 
-    if live_count < 3:
-        st.info("⚡ Few live prices found — adding AI estimates…")
+    # Phase 1: Direct scraping
+    for i, store in enumerate(stores):
+        bar.progress((i + 0.5) / len(stores), text=f"🔍 Checking {store}…")
+        scraper = STORE_SCRAPERS.get(store)
+        result = None
+        if scraper:
+            result = scraper(query)
+        if not result:
+            result = _scrape_generic(store, query)
+        if result:
+            results.append(result)
+        time.sleep(0.15)
+
+    # Phase 2: DuckDuckGo for stores not yet found
+    found_stores = {r["site"] for r in results}
+    remaining = [s for s in stores if s not in found_stores]
+    if remaining:
         try:
-            fb = ai_price_fallback(client, product, stores)
-            have = {r["site"] for r in results if r.get("price")}
-            for f in fb:
-                if f.get("site") not in have and f.get("price"):
-                    f["estimated"] = True
-                    # Ensure link exists
-                    if not f.get("link"):
-                        f["link"] = build_search_url(f["site"], product["search_query"])
-                    results.append(f)
-        except Exception as e:
-            st.warning(f"⚠️ AI estimate failed: {e}")
-            # Last-resort fallback: generate basic estimated results so user isn't left empty
-            query = product.get("search_query", product.get("name", ""))
-            for store in stores[:4]:
-                results.append({
-                    "site": store,
-                    "price": None,
-                    "link": build_search_url(store, query),
-                    "estimated": True,
-                })
+            with DDGS() as ddgs:
+                for i, store in enumerate(remaining):
+                    bar.progress((len(found_stores) + i + 1) / len(stores),
+                                 text=f"🔎 Searching {store}…")
+                    r = _ddg_store_price(ddgs, store, query)
+                    if r.get("price"):
+                        results.append(r)
+                    time.sleep(0.25)
+        except Exception:
+            pass
 
+    bar.empty()
     priced = sorted([r for r in results if r.get("price")], key=lambda x: x["price"])
     return priced[:6]
 
 
 # ── UI: Result card ───────────────────────────────────────────────────────────
 def result_card(item: dict, rank: int):
-    est  = '<span class="ph-est">(AI estimate)</span>' if item.get("estimated") else ""
     best = '<span class="ph-best">BEST PRICE</span>' if rank == 1 else ""
     st.markdown(f"""
 <div class="ph-card rank-{rank}">
@@ -407,7 +507,7 @@ def result_card(item: dict, rank: int):
     <div class="ph-rank">#{rank}</div>
     <div class="ph-info">
       <div class="ph-store">{item['site']}{best}</div>
-      <div class="ph-price">₹{item['price']:,.0f}{est}</div>
+      <div class="ph-price">₹{item['price']:,.0f}</div>
     </div>
     <a href="{item['link']}" target="_blank" class="ph-buy">Buy Now →</a>
   </div>
@@ -569,10 +669,18 @@ def main():
 
     # Fetch & show prices
     st.markdown('<div class="ph-section">Price Comparison — Cheapest First</div>', unsafe_allow_html=True)
-    results = fetch_prices(client, product)
+    results = fetch_prices(product)
 
     if not results:
-        st.error("😕 No prices found. Try a clearer / more specific query.")
+        stores = GROCERY_STORES if product.get("store_category") == "grocery_stores" else ELECTRONICS_STORES
+        query = product.get("search_query", product.get("name", ""))
+        st.warning("😕 No prices found from web scraping. Check these stores directly:")
+        links_html = ""
+        for store in stores:
+            url = build_search_url(store, query)
+            links_html += f'<a href="{url}" target="_blank" style="display:inline-block;background:#fef3c7;border:1px solid #fcd34d;border-radius:20px;padding:5px 14px;font-size:0.82rem;color:#92400e;text-decoration:none;margin:4px;">🔗 {store}</a>\n'
+        st.markdown(f'<div style="margin-top:0.5rem;">{links_html}</div>', unsafe_allow_html=True)
+        st.info("💡 Tip: Use a specific product name like \"Samsung Galaxy S24 Ultra 256GB\" instead of \"Samsung phone\"")
         return
 
     st.markdown(
@@ -598,7 +706,7 @@ def main():
 
     st.markdown(
         '<div style="text-align:center;color:#b8a99a;font-size:0.74rem;margin-top:1rem;">'
-        '⚠️ Prices fetched live via web search. AI estimates are approximate. '
+        '⚠️ All prices fetched live from actual store websites. '
         'Verify on the retailer\'s website before purchasing.</div>',
         unsafe_allow_html=True
     )
