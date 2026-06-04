@@ -204,17 +204,47 @@ STORE_DOMAINS = {
     "Reliance Digital": "reliancedigital.in", "Tata Cliq": "tatacliq.com",
 }
 
+# Exact known Indian retailer domains → display name
 STORE_NAME_MAP = {
-    "amazon": "Amazon India", "amazon.in": "Amazon India",
-    "flipkart": "Flipkart", "croma": "Croma",
-    "vijay sales": "Vijay Sales", "vijaysales": "Vijay Sales",
-    "reliance digital": "Reliance Digital", "reliancedigital": "Reliance Digital",
-    "tata cliq": "Tata Cliq", "tatacliq": "Tata Cliq",
-    "zepto": "Zepto", "blinkit": "Blinkit",
-    "swiggy": "Swiggy Instamart", "instamart": "Swiggy Instamart",
-    "bigbasket": "BigBasket", "big basket": "BigBasket",
-    "jiomart": "JioMart", "jio mart": "JioMart",
-    "dmart": "DMart Online", "d-mart": "DMart Online",
+    "amazon.in": "Amazon India",
+    "flipkart.com": "Flipkart",
+    "croma.com": "Croma",
+    "vijaysales.com": "Vijay Sales",
+    "reliancedigital.in": "Reliance Digital",
+    "tatacliq.com": "Tata Cliq",
+    "zeptonow.com": "Zepto",
+    "blinkit.com": "Blinkit",
+    "swiggy.com": "Swiggy Instamart",
+    "bigbasket.com": "BigBasket",
+    "jiomart.com": "JioMart",
+    "dmart.in": "DMart Online",
+    "snapdeal.com": "Snapdeal",
+    "meesho.com": "Meesho",
+    "paytmmall.com": "Paytm Mall",
+    "shopclues.com": "ShopClues",
+    "nykaa.com": "Nykaa",
+    "myntra.com": "Myntra",
+}
+
+# Second-hand / resale / trade-in sites — NEVER show these
+BLACKLIST_DOMAINS = {
+    "cashify.in", "cashify.com",
+    "gameloot.in", "gameloot.com",
+    "ovantica.com",
+    "addmecart.com",
+    "olx.in", "olx.com",
+    "quikr.com",
+    "ebay.in", "ebay.com",
+    "2gud.com",
+    "budli.in",
+    "togofogo.com",
+    "doorm.in",
+    "greendust.com",
+    "overcart.com",
+    "shopclues.com",  # often has dubious listings
+    "shopsy.in",
+    "glowroad.com",
+    "limeroad.com",
 }
 
 
@@ -322,27 +352,48 @@ If category is Grocery/Food → grocery_stores. If Electronics/Gadgets → elect
 
 
 # ── SerpAPI: Google Shopping price search ────────────────────────────────────
+def _is_blacklisted(source: str, link: str) -> bool:
+    """Return True if the result is from a blacklisted resale/second-hand site."""
+    combined = (source + " " + link).lower()
+    return any(bd in combined for bd in BLACKLIST_DOMAINS)
+
+
 def _normalize_store(source_name: str, link: str) -> str | None:
-    """Map a result source/link to a known store name."""
+    """Map a result source/link to a known trusted store name. Returns None if unknown."""
     combined = (source_name + " " + link).lower()
-    for key, val in STORE_NAME_MAP.items():
-        if key in combined:
-            return val
-    return None
+    for domain, name in STORE_NAME_MAP.items():
+        if domain in combined:
+            return name
+    return None  # Unknown store — will be filtered out
+
+
+def _is_title_relevant(title: str, query: str) -> bool:
+    """Basic check: at least 40% of query words appear in the title."""
+    if not title or not query:
+        return True  # can't judge, allow through
+    query_words = [w for w in query.lower().split() if len(w) > 2]
+    if not query_words:
+        return True
+    title_lower = title.lower()
+    matches = sum(1 for w in query_words if w in title_lower)
+    return (matches / len(query_words)) >= 0.4
 
 
 def serpapi_google_shopping(query: str, serpapi_key: str, gl: str = "in", hl: str = "en") -> list:
     """
-    Use SerpAPI Google Shopping to get real live prices.
-    Returns list of dicts: {site, price, title, thumbnail, link}
+    Use SerpAPI Google Shopping to get real live prices from trusted Indian retailers.
+    Filters out: second-hand/resale sites, unknown stores, irrelevant products.
     """
+    # Append "new" to avoid resale/trade-in listings
+    search_q = f"{query} new"
     params = {
         "engine": "google_shopping",
-        "q": query,
+        "q": search_q,
         "api_key": serpapi_key,
         "gl": gl,       # country = India
         "hl": hl,       # language = English
-        "num": "20",
+        "num": "40",    # fetch more so we have enough after filtering
+        "tbs": "new",   # Google Shopping filter: new products only
     }
     try:
         resp = requests.get(SERPAPI_BASE, params=params, timeout=15)
@@ -353,33 +404,44 @@ def serpapi_google_shopping(query: str, serpapi_key: str, gl: str = "in", hl: st
         if resp.status_code != 200:
             raise ValueError(f"SerpAPI error: HTTP {resp.status_code}")
         data = resp.json()
-        results = []
         seen_stores = {}
 
         shopping_results = data.get("shopping_results", [])
         for item in shopping_results:
-            price_str = item.get("price", "") or ""
-            # Parse price — handle formats like "₹1,299", "Rs. 1299", "1,299.00"
-            price_clean = re.sub(r'[₹Rs.,\s]', '', price_str, flags=re.IGNORECASE)
+            source = item.get("source", "") or ""
+            link   = item.get("link", "")   or ""
+            title  = item.get("title", "")  or ""
+
+            # ── Filter 1: skip blacklisted resale/second-hand sites
+            if _is_blacklisted(source, link):
+                continue
+
+            # ── Filter 2: only accept known trusted Indian retailers
+            store = _normalize_store(source, link)
+            if not store:
+                continue  # unknown store — skip entirely
+
+            # ── Filter 3: basic title relevance check
+            if not _is_title_relevant(title, query):
+                continue
+
+            # ── Parse price — handles ₹1,299 / Rs.1299 / 1299.00
+            price_str   = item.get("price", "") or ""
+            price_clean = re.sub(r'[^\d.]', '', price_str)
+            # If multiple dots, keep only the first
+            parts = price_clean.split('.')
+            price_clean = parts[0] + ('.' + parts[1] if len(parts) > 1 else '')
             try:
                 price = float(price_clean) if price_clean else None
             except ValueError:
                 price = None
 
-            if not price or price < 10 or price > 10_000_000:
+            if not price or price < 100 or price > 10_000_000:
                 continue
 
-            source = item.get("source", "") or ""
-            link = item.get("link", "") or ""
-            title = item.get("title", "") or ""
             thumbnail = item.get("thumbnail", "") or ""
 
-            store = _normalize_store(source, link)
-            if not store:
-                # Use the source name directly if it's a recognizable retailer
-                store = source if source else "Unknown"
-
-            # Keep only the cheapest per store
+            # Keep only the cheapest listing per store
             if store not in seen_stores or price < seen_stores[store]["price"]:
                 seen_stores[store] = {
                     "site": store,
@@ -390,8 +452,7 @@ def serpapi_google_shopping(query: str, serpapi_key: str, gl: str = "in", hl: st
                     "live": True,
                 }
 
-        results = sorted(seen_stores.values(), key=lambda x: x["price"])
-        return results
+        return sorted(seen_stores.values(), key=lambda x: x["price"])
 
     except (requests.RequestException, ValueError) as e:
         raise
@@ -399,11 +460,16 @@ def serpapi_google_shopping(query: str, serpapi_key: str, gl: str = "in", hl: st
 
 def serpapi_google_search(query: str, serpapi_key: str) -> list:
     """
-    Fallback: Use SerpAPI regular Google search for price snippets.
+    Fallback: Google Search restricted to known Indian retailer domains.
     """
+    # Build site: query targeting only known retailers
+    trusted_domains = list(STORE_NAME_MAP.keys())
+    site_filter = " OR ".join(f"site:{d}" for d in trusted_domains[:8])
+    search_q = f"({site_filter}) {query} buy new price"
+
     params = {
         "engine": "google",
-        "q": query + " price India ₹",
+        "q": search_q,
         "api_key": serpapi_key,
         "gl": "in",
         "hl": "en",
@@ -414,29 +480,31 @@ def serpapi_google_search(query: str, serpapi_key: str) -> list:
         if resp.status_code != 200:
             return []
         data = resp.json()
-        results = []
         seen_stores = {}
 
         organic = data.get("organic_results", [])
         for item in organic:
+            link    = item.get("link", "")    or ""
             snippet = item.get("snippet", "") or ""
-            link = item.get("link", "") or ""
-            title = item.get("title", "") or ""
-            combined = snippet + " " + title
+            title   = item.get("title", "")   or ""
 
-            # Extract price from snippet
-            m = re.search(r'[₹Rs.]+\s*([\d,]+(?:\.\d{1,2})?)', combined, re.IGNORECASE)
+            # Skip blacklisted sites even in organic results
+            if _is_blacklisted("", link):
+                continue
+
+            store = _normalize_store("", link)
+            if not store:
+                continue
+
+            combined = snippet + " " + title
+            m = re.search(r'[₹]\s*([\d,]+(?:\.\d{1,2})?)', combined)
             if not m:
                 continue
             try:
                 price = float(m.group(1).replace(",", ""))
             except ValueError:
                 continue
-            if price < 10 or price > 10_000_000:
-                continue
-
-            store = _normalize_store("", link)
-            if not store:
+            if price < 100 or price > 10_000_000:
                 continue
 
             if store not in seen_stores or price < seen_stores[store]["price"]:
