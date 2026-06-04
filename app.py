@@ -496,8 +496,6 @@ def fetch_prices(product: dict) -> list:
             bar.progress(int(done / total * 95),
                          text=f"✅ {done}/{total} stores checked…")
             if result and result.get("price"):
-                # Always override link with our own clean store URL
-                result["link"] = STORE_SEARCH_URLS[store](query)
                 found[store] = result
 
     bar.progress(100, text="✅ Done!")
