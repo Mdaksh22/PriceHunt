@@ -9,6 +9,7 @@ from PIL import Image
 import requests
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from ddgs import DDGS
 
 # ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -252,11 +253,16 @@ def parse_json_response(raw: str) -> dict:
 
 def extract_price(text: str):
     """Extract the first reasonable INR price from text."""
+    if not text:
+        return None
     patterns = [
         r'₹\s*([\d,]+(?:\.\d{1,2})?)',
         r'Rs\.?\s*([\d,]+(?:\.\d{1,2})?)',
         r'INR\s*([\d,]+(?:\.\d{1,2})?)',
         r'MRP[:\s]*₹?\s*([\d,]+(?:\.\d{1,2})?)',
+        r'at\s*₹?\s*([\d,]+(?:\.\d{1,2})?)',
+        r'for\s*₹?\s*([\d,]+(?:\.\d{1,2})?)',
+        r'\?\s*([\d,]+(?:\.\d{1,2})?)',  # Handle DDG replacing rupee symbol with question mark
         r'"price"\s*:\s*"?([\d,.]+)',
         r'"selling_price"\s*:\s*"?([\d,.]+)',
     ]
@@ -265,10 +271,48 @@ def extract_price(text: str):
         if m:
             try:
                 p = float(m.group(1).replace(",", ""))
-                if 50 < p < 10_000_000:
+                if 5 < p < 10_000_000:
                     return p
             except ValueError:
                 pass
+    return None
+
+
+def extract_price_from_json_ld(html: str) -> float | None:
+    """Parse structured data (JSON-LD) to find the price."""
+    if not html:
+        return None
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "")
+                if isinstance(data, list):
+                    items = data
+                else:
+                    items = [data]
+                    
+                for item in items:
+                    # Check offers
+                    offers = item.get("offers")
+                    if offers:
+                        if isinstance(offers, list):
+                            for off in offers:
+                                price = off.get("price")
+                                if price:
+                                    return float(str(price).replace(",", ""))
+                        elif isinstance(offers, dict):
+                            price = offers.get("price")
+                            if price:
+                                return float(str(price).replace(",", ""))
+                    
+                    price = item.get("price")
+                    if price:
+                        return float(str(price).replace(",", ""))
+            except Exception:
+                pass
+    except Exception:
+        pass
     return None
 
 
@@ -328,194 +372,203 @@ def _get(url: str, timeout: int = 12) -> requests.Response | None:
     except Exception:
         return None
 
-
-def _scrape_amazon(query: str) -> dict | None:
-    url = f"https://www.amazon.in/s?k={urllib.parse.quote_plus(query)}&i=aps"
+def _scrape_amazon_direct(url: str) -> float | None:
+    """Fetch Amazon product page and extract price."""
     r = _get(url)
     if not r:
         return None
     soup = BeautifulSoup(r.text, "html.parser")
-    for sel in [
-        "span.a-price span.a-offscreen",
-        "span.a-price-whole",
-        "span[data-a-color='price'] span.a-offscreen",
-    ]:
+    for sel in ["span.a-price span.a-offscreen", "span.a-price-whole", "span.a-color-price"]:
         el = soup.select_one(sel)
         if el:
             price = extract_price(el.get_text())
             if price:
-                # Try to get direct product link
-                card = el.find_parent(attrs={"data-component-type": "s-search-result"})
-                link = STORE_SEARCH_URLS["Amazon India"](query)
-                if card:
-                    a = card.select_one("h2 a[href]")
-                    if a and a.get("href"):
-                        link = "https://www.amazon.in" + a["href"].split("?")[0]
-                return {"site": "Amazon India", "price": price,
-                        "link": STORE_SEARCH_URLS["Amazon India"](query)}
+                return price
     return None
 
 
-def _scrape_flipkart(query: str) -> dict | None:
-    url = f"https://www.flipkart.com/search?q={urllib.parse.quote_plus(query)}"
+def _scrape_flipkart_direct(url: str) -> float | None:
+    """Fetch Flipkart product page and extract price."""
     r = _get(url)
     if not r:
         return None
+    price = extract_price_from_json_ld(r.text)
+    if price:
+        return price
     soup = BeautifulSoup(r.text, "html.parser")
-    for sel in ["div.Nx9bqj", "div._30jeq3", "div._1_WHN1",
-                "div[class*='price']", "span[class*='price']"]:
+    for sel in ["div.Nx9bqj", "div._30jeq3", "div._1_WHN1"]:
         el = soup.select_one(sel)
         if el:
             price = extract_price(el.get_text())
             if price:
-                return {"site": "Flipkart", "price": price,
-                        "link": STORE_SEARCH_URLS["Flipkart"](query)}
+                return price
     return None
 
 
-def _scrape_bigbasket(query: str) -> dict | None:
-    # BigBasket exposes a JSON search API — much more reliable than HTML parsing
-    api_url = f"https://www.bigbasket.com/catalog/search/?q={urllib.parse.quote_plus(query)}&nc=as"
-    r = _get(api_url)
-    if not r:
-        return None
-    try:
-        data = r.json()
-        for tab in data.get("tab", []):
-            for prod in tab.get("prod_list", []):
-                pricing = (prod.get("pricing") or [{}])[0]
-                price = pricing.get("discount_price") or pricing.get("mrp")
-                if price:
-                    return {"site": "BigBasket", "price": float(price),
-                            "link": STORE_SEARCH_URLS["BigBasket"](query)}
-    except Exception:
-        pass
-    # HTML fallback
-    r2 = _get(f"https://www.bigbasket.com/ps/?q={urllib.parse.quote_plus(query)}")
-    if r2:
-        soup = BeautifulSoup(r2.text, "html.parser")
-        for sel in ["span.discnt-price", "span.selling-price", "div.sp",
-                    "span[class*='price']", "div[class*='price']"]:
-            el = soup.select_one(sel)
-            if el:
-                price = extract_price(el.get_text())
-                if price:
-                    return {"site": "BigBasket", "price": price,
-                            "link": STORE_SEARCH_URLS["BigBasket"](query)}
-    return None
-
-
-def _scrape_croma(query: str) -> dict | None:
-    url = f"https://www.croma.com/searchB?q={urllib.parse.quote_plus(query)}%3Arelevance&langCode=en"
+def _scrape_bigbasket_direct(url: str) -> float | None:
+    """Fetch BigBasket product page and extract price."""
     r = _get(url)
     if not r:
         return None
-    soup = BeautifulSoup(r.text, "html.parser")
-    for sel in ["span.amount", "div.new-price", "div[class*='price'] span",
-                "p[class*='price']", "span[class*='amount']"]:
-        el = soup.select_one(sel)
-        if el:
-            price = extract_price(el.get_text())
-            if price:
-                return {"site": "Croma", "price": price,
-                        "link": STORE_SEARCH_URLS["Croma"](query)}
-    return None
+    price = extract_price_from_json_ld(r.text)
+    if price:
+        return price
+    price = extract_price(r.text[:80000])
+    return price
 
 
-def _scrape_reliance(query: str) -> dict | None:
-    url = f"https://www.reliancedigital.in/search?q={urllib.parse.quote_plus(query)}:relevance"
+def _scrape_generic_direct(url: str) -> float | None:
+    """Fetch generic product page and search for price."""
     r = _get(url)
     if not r:
         return None
-    soup = BeautifulSoup(r.text, "html.parser")
-    for sel in ["span.pdp__offerPrice", "p.price", "span[class*='price']",
-                "div[class*='price']"]:
-        el = soup.select_one(sel)
-        if el:
-            price = extract_price(el.get_text())
-            if price:
-                return {"site": "Reliance Digital", "price": price,
-                        "link": STORE_SEARCH_URLS["Reliance Digital"](query)}
-    return None
+    price = extract_price_from_json_ld(r.text)
+    if price:
+        return price
+    price = extract_price(r.text[:80000])
+    return price
 
 
-def _scrape_generic_html(store: str, query: str) -> dict | None:
-    """Generic HTML scraper — tries many common price CSS patterns."""
-    url = STORE_SEARCH_URLS[store](query)
-    r = _get(url, timeout=10)
-    if not r:
-        return None
-    soup = BeautifulSoup(r.text, "html.parser")
-    # Look for any element whose text looks like an INR price
-    for el in soup.find_all(string=re.compile(r'[₹₹]\s*\d')):
-        price = extract_price(str(el))
-        if price:
-            return {"site": store, "price": price,
-                    "link": STORE_SEARCH_URLS[store](query)}
-    return None
+DIRECT_SCRAPERS = {
+    "Amazon India":     _scrape_amazon_direct,
+    "Flipkart":         _scrape_flipkart_direct,
+    "BigBasket":        _scrape_bigbasket_direct,
+}
 
-
-# Map store name → dedicated scraper function
-STORE_SCRAPERS = {
-    "Amazon India":     _scrape_amazon,
-    "Flipkart":         _scrape_flipkart,
-    "BigBasket":        _scrape_bigbasket,
-    "Croma":            _scrape_croma,
-    "Reliance Digital": _scrape_reliance,
+STORE_DOMAINS = {
+    "amazon.in":          "Amazon India",
+    "flipkart.com":       "Flipkart",
+    "croma.com":          "Croma",
+    "reliancedigital.in": "Reliance Digital",
+    "vijaysales.com":     "Vijay Sales",
+    "tatacliq.com":       "Tata Cliq",
+    "blinkit.com":        "Blinkit",
+    "zeptonow.com":       "Zepto",
+    "bigbasket.com":      "BigBasket",
+    "swiggy.com":         "Swiggy Instamart",
+    "jiomart.com":        "JioMart",
+    "dmart.in":           "DMart Online",
 }
 
 
 # ── Main price fetcher — parallel scraping ────────────────────────────────────
 def fetch_prices(product: dict) -> list:
     """
-    Scrapes each store in parallel threads. No API key needed.
-    Buy Now links always use our own clean store search URLs.
+    Finds prices using DuckDuckGo search to retrieve direct product links
+    and then parses prices from the search snippets or by fetching product pages in parallel.
     """
-    stores = (GROCERY_STORES if product.get("store_category") == "grocery_stores"
-              else ELECTRONICS_STORES)
-    query  = product.get("search_query", product.get("name", ""))
-
-    found: dict[str, dict] = {}
-    bar = st.progress(0, text="🔍 Fetching prices from stores…")
-
-    def scrape_one(store: str) -> tuple[str, dict | None]:
-        fn = STORE_SCRAPERS.get(store, lambda q: _scrape_generic_html(store, q))
-        try:
-            return store, fn(query)
-        except Exception:
-            return store, None
-
+    category_stores = (GROCERY_STORES if product.get("store_category") == "grocery_stores"
+                       else ELECTRONICS_STORES)
+    query = product.get("search_query", product.get("name", ""))
+    
+    # We do a general DuckDuckGo search for: buy <query> online india
+    search_q = f"buy {query} online india"
+    
+    bar = st.progress(0, text="🔍 Searching DuckDuckGo for product links…")
+    
+    raw_results = []
+    try:
+        with DDGS() as ddgs:
+            raw_results = list(ddgs.text(search_q, max_results=30))
+    except Exception as e:
+        st.warning(f"⚠️ Search engine warning: {e}")
+        
+    bar.progress(30, text="🔗 Mapping links to store domains…")
+    
+    # Filter and group by store name
+    found_stores = {}
+    for r in raw_results:
+        href = r.get("href", "")
+        title = r.get("title", "")
+        body = r.get("body", "")
+        
+        parsed_url = urllib.parse.urlparse(href)
+        domain = parsed_url.netloc.replace("www.", "").lower()
+        
+        matched_store = None
+        for d_key, store_name in STORE_DOMAINS.items():
+            if d_key in domain:
+                # Make sure the matched store is relevant to the active category
+                if store_name in category_stores:
+                    matched_store = store_name
+                    break
+        
+        if matched_store:
+            # Try to parse price from snippet
+            price = extract_price(title) or extract_price(body)
+            
+            # Keep the first result for this store, or update if we found a price
+            if matched_store not in found_stores or (price and not found_stores[matched_store]["price"]):
+                found_stores[matched_store] = {
+                    "site": matched_store,
+                    "link": href,
+                    "price": price,
+                }
+                
+    # Now, for any store found where price is None, we try to fetch and scrape the direct product page
+    stores_to_scrape = [item for item in found_stores.values() if item["price"] is None]
+    
     done = 0
-    total = len(stores)
+    total = len(stores_to_scrape)
+    
+    def scrape_store_page(item: dict) -> tuple[str, float | None]:
+        store_name = item["site"]
+        url = item["link"]
+        fn = DIRECT_SCRAPERS.get(store_name, _scrape_generic_direct)
+        try:
+            return store_name, fn(url)
+        except Exception:
+            return store_name, None
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futures = {ex.submit(scrape_one, s): s for s in stores}
-        for future in as_completed(futures):
-            store, result = future.result()
-            done += 1
-            bar.progress(int(done / total * 95),
-                         text=f"✅ {done}/{total} stores checked…")
-            if result and result.get("price"):
-                found[store] = result
+    if total > 0:
+        bar.progress(40, text=f"🔍 Fetching live prices from {total} stores…")
+        with ThreadPoolExecutor(max_workers=min(6, total)) as ex:
+            futures = {ex.submit(scrape_store_page, item): item for item in stores_to_scrape}
+            for future in as_completed(futures):
+                store_name, price = future.result()
+                done += 1
+                bar.progress(40 + int(done / total * 55),
+                             text=f"✅ {done}/{total} stores checked…")
+                if price:
+                    found_stores[store_name]["price"] = price
 
     bar.progress(100, text="✅ Done!")
     time.sleep(0.3)
     bar.empty()
-
-    return sorted(found.values(), key=lambda x: x["price"])
+    
+    # Convert dict to list
+    results_list = list(found_stores.values())
+    
+    # Sort results:
+    # 1. Items with prices sorted ascending
+    # 2. Items without prices sorted by store name
+    with_price = [r for r in results_list if r["price"] is not None]
+    no_price = [r for r in results_list if r["price"] is None]
+    
+    sorted_with_price = sorted(with_price, key=lambda x: x["price"])
+    sorted_no_price = sorted(no_price, key=lambda x: x["site"])
+    
+    return sorted_with_price + sorted_no_price
 
 
 
 # ── UI: Result card ───────────────────────────────────────────────────────────
 def result_card(item: dict, rank: int):
-    best = '<span class="ph-best">BEST PRICE</span>' if rank == 1 else ""
+    price_val = item.get("price")
+    if price_val is not None:
+        price_display = f"₹{price_val:,.0f}"
+        best = '<span class="ph-best">BEST PRICE</span>' if rank == 1 else ""
+    else:
+        price_display = '<span style="font-size: 1.1rem; color: #78716c; font-weight: 600;">Check Price</span>'
+        best = ""
+        
     st.markdown(f"""
 <div class="ph-card rank-{rank}">
   <div class="ph-card-inner">
     <div class="ph-rank">#{rank}</div>
     <div class="ph-info">
       <div class="ph-store">{item['site']}{best}</div>
-      <div class="ph-price">₹{item['price']:,.0f}</div>
+      <div class="ph-price">{price_display}</div>
     </div>
     <a href="{item['link']}" target="_blank" rel="noopener noreferrer" class="ph-buy">Buy Now →</a>
   </div>
@@ -763,16 +816,17 @@ def main():
     for i, item in enumerate(results, 1):
         result_card(item, i)
 
-    if len(results) >= 2:
-        save = results[-1]["price"] - results[0]["price"]
-        pct  = save / results[-1]["price"] * 100
+    results_with_price = [r for r in results if r["price"] is not None]
+    if len(results_with_price) >= 2:
+        save = results_with_price[-1]["price"] - results_with_price[0]["price"]
+        pct  = save / results_with_price[-1]["price"] * 100
         if save > 0:
             st.markdown(f"""
 <div class="ph-savings">
   <div class="ph-savings-amt">💰 Save ₹{save:,.0f} ({pct:.0f}%)</div>
   <div class="ph-savings-sub">
-    Buy from <strong>{results[0]['site']}</strong>
-    instead of <strong>{results[-1]['site']}</strong>
+    Buy from <strong>{results_with_price[0]['site']}</strong>
+    instead of <strong>{results_with_price[-1]['site']}</strong>
   </div>
 </div>""", unsafe_allow_html=True)
 
