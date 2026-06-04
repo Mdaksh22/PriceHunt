@@ -6,7 +6,9 @@ import re
 import time
 import urllib.parse
 from PIL import Image
-from duckduckgo_search import DDGS
+import requests
+from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -198,20 +200,17 @@ STORE_SEARCH_URLS = {
     "Tata Cliq":        lambda q: f"https://www.tatacliq.com/search/?text={urllib.parse.quote_plus(q)}",
 }
 
-# DuckDuckGo site: filter domains — for price searching
-STORE_DDG_DOMAINS = {
-    "Blinkit":          "blinkit.com",
-    "Zepto":            "zeptonow.com",
-    "BigBasket":        "bigbasket.com",
-    "Swiggy Instamart": "swiggy.com",
-    "JioMart":          "jiomart.com",
-    "DMart Online":     "dmart.in",
-    "Amazon India":     "amazon.in",
-    "Flipkart":         "flipkart.com",
-    "Croma":            "croma.com",
-    "Vijay Sales":      "vijaysales.com",
-    "Reliance Digital": "reliancedigital.in",
-    "Tata Cliq":        "tatacliq.com",
+# ── HTTP headers — mimic a real browser ─────────────────────────────────────
+SCRAPE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
 }
 
 
@@ -319,70 +318,194 @@ Grocery/Food → grocery_stores. Electronics/Gadgets/Phones/Laptops → electron
     return parse_json_response(raw)
 
 
-# ── DuckDuckGo broad search — ONE query, match all stores ────────────────────
+# ── Per-store scrapers ───────────────────────────────────────────────────────
+
+def _get(url: str, timeout: int = 12) -> requests.Response | None:
+    """GET with browser headers. Returns None on any error."""
+    try:
+        r = requests.get(url, headers=SCRAPE_HEADERS, timeout=timeout, allow_redirects=True)
+        return r if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def _scrape_amazon(query: str) -> dict | None:
+    url = f"https://www.amazon.in/s?k={urllib.parse.quote_plus(query)}&i=aps"
+    r = _get(url)
+    if not r:
+        return None
+    soup = BeautifulSoup(r.text, "html.parser")
+    for sel in [
+        "span.a-price span.a-offscreen",
+        "span.a-price-whole",
+        "span[data-a-color='price'] span.a-offscreen",
+    ]:
+        el = soup.select_one(sel)
+        if el:
+            price = extract_price(el.get_text())
+            if price:
+                # Try to get direct product link
+                card = el.find_parent(attrs={"data-component-type": "s-search-result"})
+                link = STORE_SEARCH_URLS["Amazon India"](query)
+                if card:
+                    a = card.select_one("h2 a[href]")
+                    if a and a.get("href"):
+                        link = "https://www.amazon.in" + a["href"].split("?")[0]
+                return {"site": "Amazon India", "price": price,
+                        "link": STORE_SEARCH_URLS["Amazon India"](query)}
+    return None
+
+
+def _scrape_flipkart(query: str) -> dict | None:
+    url = f"https://www.flipkart.com/search?q={urllib.parse.quote_plus(query)}"
+    r = _get(url)
+    if not r:
+        return None
+    soup = BeautifulSoup(r.text, "html.parser")
+    for sel in ["div.Nx9bqj", "div._30jeq3", "div._1_WHN1",
+                "div[class*='price']", "span[class*='price']"]:
+        el = soup.select_one(sel)
+        if el:
+            price = extract_price(el.get_text())
+            if price:
+                return {"site": "Flipkart", "price": price,
+                        "link": STORE_SEARCH_URLS["Flipkart"](query)}
+    return None
+
+
+def _scrape_bigbasket(query: str) -> dict | None:
+    # BigBasket exposes a JSON search API — much more reliable than HTML parsing
+    api_url = f"https://www.bigbasket.com/catalog/search/?q={urllib.parse.quote_plus(query)}&nc=as"
+    r = _get(api_url)
+    if not r:
+        return None
+    try:
+        data = r.json()
+        for tab in data.get("tab", []):
+            for prod in tab.get("prod_list", []):
+                pricing = (prod.get("pricing") or [{}])[0]
+                price = pricing.get("discount_price") or pricing.get("mrp")
+                if price:
+                    return {"site": "BigBasket", "price": float(price),
+                            "link": STORE_SEARCH_URLS["BigBasket"](query)}
+    except Exception:
+        pass
+    # HTML fallback
+    r2 = _get(f"https://www.bigbasket.com/ps/?q={urllib.parse.quote_plus(query)}")
+    if r2:
+        soup = BeautifulSoup(r2.text, "html.parser")
+        for sel in ["span.discnt-price", "span.selling-price", "div.sp",
+                    "span[class*='price']", "div[class*='price']"]:
+            el = soup.select_one(sel)
+            if el:
+                price = extract_price(el.get_text())
+                if price:
+                    return {"site": "BigBasket", "price": price,
+                            "link": STORE_SEARCH_URLS["BigBasket"](query)}
+    return None
+
+
+def _scrape_croma(query: str) -> dict | None:
+    url = f"https://www.croma.com/searchB?q={urllib.parse.quote_plus(query)}%3Arelevance&langCode=en"
+    r = _get(url)
+    if not r:
+        return None
+    soup = BeautifulSoup(r.text, "html.parser")
+    for sel in ["span.amount", "div.new-price", "div[class*='price'] span",
+                "p[class*='price']", "span[class*='amount']"]:
+        el = soup.select_one(sel)
+        if el:
+            price = extract_price(el.get_text())
+            if price:
+                return {"site": "Croma", "price": price,
+                        "link": STORE_SEARCH_URLS["Croma"](query)}
+    return None
+
+
+def _scrape_reliance(query: str) -> dict | None:
+    url = f"https://www.reliancedigital.in/search?q={urllib.parse.quote_plus(query)}:relevance"
+    r = _get(url)
+    if not r:
+        return None
+    soup = BeautifulSoup(r.text, "html.parser")
+    for sel in ["span.pdp__offerPrice", "p.price", "span[class*='price']",
+                "div[class*='price']"]:
+        el = soup.select_one(sel)
+        if el:
+            price = extract_price(el.get_text())
+            if price:
+                return {"site": "Reliance Digital", "price": price,
+                        "link": STORE_SEARCH_URLS["Reliance Digital"](query)}
+    return None
+
+
+def _scrape_generic_html(store: str, query: str) -> dict | None:
+    """Generic HTML scraper — tries many common price CSS patterns."""
+    url = STORE_SEARCH_URLS[store](query)
+    r = _get(url, timeout=10)
+    if not r:
+        return None
+    soup = BeautifulSoup(r.text, "html.parser")
+    # Look for any element whose text looks like an INR price
+    for el in soup.find_all(string=re.compile(r'[₹₹]\s*\d')):
+        price = extract_price(str(el))
+        if price:
+            return {"site": store, "price": price,
+                    "link": STORE_SEARCH_URLS[store](query)}
+    return None
+
+
+# Map store name → dedicated scraper function
+STORE_SCRAPERS = {
+    "Amazon India":     _scrape_amazon,
+    "Flipkart":         _scrape_flipkart,
+    "BigBasket":        _scrape_bigbasket,
+    "Croma":            _scrape_croma,
+    "Reliance Digital": _scrape_reliance,
+}
+
+
+# ── Main price fetcher — parallel scraping ────────────────────────────────────
 def fetch_prices(product: dict) -> list:
     """
-    One broad DuckDuckGo search → filter results by known store domains.
-    Buy Now links are ALWAYS our own direct store search URLs (no redirects).
+    Scrapes each store in parallel threads. No API key needed.
+    Buy Now links always use our own clean store search URLs.
     """
     stores = (GROCERY_STORES if product.get("store_category") == "grocery_stores"
               else ELECTRONICS_STORES)
     query  = product.get("search_query", product.get("name", ""))
 
-    # Build list of target domains for this category
-    target_domains = {STORE_DDG_DOMAINS[s]: s for s in stores if s in STORE_DDG_DOMAINS}
+    found: dict[str, dict] = {}
+    bar = st.progress(0, text="🔍 Fetching prices from stores…")
 
-    # Single broad query — much more likely to return price snippets than site: filters
-    broad_queries = [
-        f"{query} price India buy",
-        f"{query} buy online India",
-        f"{query} ₹ price",
-    ]
+    def scrape_one(store: str) -> tuple[str, dict | None]:
+        fn = STORE_SCRAPERS.get(store, lambda q: _scrape_generic_html(store, q))
+        try:
+            return store, fn(query)
+        except Exception:
+            return store, None
 
-    found: dict[str, dict] = {}   # store_name → result dict
-    bar = st.progress(0, text="🔍 Searching for prices…")
+    done = 0
+    total = len(stores)
 
-    try:
-        with DDGS() as ddgs:
-            for qi, q in enumerate(broad_queries):
-                if len(found) >= len(stores):   # got all stores
-                    break
-                bar.progress(20 + qi * 25, text=f"🔎 Scanning results… ({qi+1}/{len(broad_queries)})")
-                try:
-                    for r in ddgs.text(q, max_results=30):
-                        href  = r.get("href", "") or ""
-                        title = r.get("title", "") or ""
-                        body  = r.get("body", "")  or ""
-
-                        # Match result URL to a known store
-                        matched_store = None
-                        for domain, store_name in target_domains.items():
-                            if domain in href:
-                                matched_store = store_name
-                                break
-                        if not matched_store or matched_store in found:
-                            continue
-
-                        # Extract price from title + snippet
-                        price = extract_price(title + " " + body)
-                        if price:
-                            found[matched_store] = {
-                                "site":  matched_store,
-                                "price": price,
-                                # Always our own clean store URL — never redirect
-                                "link":  STORE_SEARCH_URLS[matched_store](query),
-                            }
-                except Exception:
-                    pass
-                time.sleep(0.4)
-    except Exception:
-        pass
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futures = {ex.submit(scrape_one, s): s for s in stores}
+        for future in as_completed(futures):
+            store, result = future.result()
+            done += 1
+            bar.progress(int(done / total * 95),
+                         text=f"✅ {done}/{total} stores checked…")
+            if result and result.get("price"):
+                # Always override link with our own clean store URL
+                result["link"] = STORE_SEARCH_URLS[store](query)
+                found[store] = result
 
     bar.progress(100, text="✅ Done!")
     time.sleep(0.3)
     bar.empty()
 
     return sorted(found.values(), key=lambda x: x["price"])
+
 
 
 # ── UI: Result card ───────────────────────────────────────────────────────────
