@@ -26,20 +26,26 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 .stApp { background-color: #fdf8f2 !important; }
 .block-container { padding-top: 1.5rem !important; max-width: 820px !important; }
 
-/* ── Hide ALL Streamlit branding ── */
-#MainMenu                          { display: none !important; }
-footer                             { display: none !important; }
-header                             { display: none !important; }
+/* ── Hide ALL Streamlit branding (CSS layer) ── */
+#MainMenu, footer, header          { display: none !important; }
 .stDeployButton                    { display: none !important; }
 #stDecoration                      { display: none !important; }
 [data-testid="stToolbar"]          { display: none !important; }
 [data-testid="stToolbarActions"]   { display: none !important; }
 [data-testid="manage-app-button"]  { display: none !important; }
 [data-testid="stStatusWidget"]     { display: none !important; }
-.viewerBadge_container__1QSob     { display: none !important; }
-.styles_viewerBadge__CvC9N        { display: none !important; }
+[data-testid="stActionButton"]     { display: none !important; }
+.viewerBadge_container__1QSob,
+.styles_viewerBadge__CvC9N,
+.viewerBadge_link__qRIco           { display: none !important; }
+/* emotion-cache class prefixes used for wand/crown badges */
+[class*="badge"]                   { display: none !important; }
+[class*="Badge"]                   { display: none !important; }
+[class*="ActionButton"]            { display: none !important; }
+/* Fixed-position overlays at bottom corners */
+button[data-testid="baseButton-headerNoPadding"] { display: none !important; }
 .stApp > header::before            { display: none !important; }
-.stApp { padding-bottom: 0 !important; }
+.stApp                             { padding-bottom: 0 !important; }
 
 .ph-title {
     font-size: 2.6rem; font-weight: 800; color: #92400e;
@@ -313,73 +319,62 @@ Grocery/Food → grocery_stores. Electronics/Gadgets/Phones/Laptops → electron
     return parse_json_response(raw)
 
 
-# ── DuckDuckGo per-store price search ────────────────────────────────────────
-def _ddg_price_for_store(ddgs: DDGS, store: str, query: str) -> float | None:
-    """
-    Search DuckDuckGo restricted to a single store's domain and extract a price.
-    Uses multiple query strategies for best hit rate.
-    """
-    domain = STORE_DDG_DOMAINS.get(store, "")
-    if not domain:
-        return None
-
-    # Try progressively broader queries
-    queries = [
-        f'site:{domain} "{query}" price',
-        f'site:{domain} {query} ₹',
-        f'site:{domain} {query} buy',
-    ]
-
-    for q in queries:
-        try:
-            for r in ddgs.text(q, max_results=8):
-                combined = (
-                    r.get("title", "") + " " +
-                    r.get("body", "") + " " +
-                    r.get("href", "")
-                )
-                price = extract_price(combined)
-                if price:
-                    return price
-            time.sleep(0.2)
-        except Exception:
-            time.sleep(0.3)
-
-    return None
-
-
-# ── Main price fetcher ────────────────────────────────────────────────────────
+# ── DuckDuckGo broad search — ONE query, match all stores ────────────────────
 def fetch_prices(product: dict) -> list:
     """
-    Fetch prices using DuckDuckGo, one query per store.
-    Buy Now links are ALWAYS our own direct store search URLs — never DDG/redirect URLs.
+    One broad DuckDuckGo search → filter results by known store domains.
+    Buy Now links are ALWAYS our own direct store search URLs (no redirects).
     """
     stores = (GROCERY_STORES if product.get("store_category") == "grocery_stores"
               else ELECTRONICS_STORES)
-    query = product.get("search_query", product.get("name", ""))
+    query  = product.get("search_query", product.get("name", ""))
 
-    results = []
-    bar = st.progress(0, text="🔍 Searching stores…")
+    # Build list of target domains for this category
+    target_domains = {STORE_DDG_DOMAINS[s]: s for s in stores if s in STORE_DDG_DOMAINS}
+
+    # Single broad query — much more likely to return price snippets than site: filters
+    broad_queries = [
+        f"{query} price India buy",
+        f"{query} buy online India",
+        f"{query} ₹ price",
+    ]
+
+    found: dict[str, dict] = {}   # store_name → result dict
+    bar = st.progress(0, text="🔍 Searching for prices…")
 
     try:
         with DDGS() as ddgs:
-            for i, store in enumerate(stores):
-                pct = int((i / len(stores)) * 100)
-                bar.progress(pct, text=f"🔎 Checking {store}…")
+            for qi, q in enumerate(broad_queries):
+                if len(found) >= len(stores):   # got all stores
+                    break
+                bar.progress(20 + qi * 25, text=f"🔎 Scanning results… ({qi+1}/{len(broad_queries)})")
+                try:
+                    for r in ddgs.text(q, max_results=30):
+                        href  = r.get("href", "") or ""
+                        title = r.get("title", "") or ""
+                        body  = r.get("body", "")  or ""
 
-                price = _ddg_price_for_store(ddgs, store, query)
+                        # Match result URL to a known store
+                        matched_store = None
+                        for domain, store_name in target_domains.items():
+                            if domain in href:
+                                matched_store = store_name
+                                break
+                        if not matched_store or matched_store in found:
+                            continue
 
-                if price:
-                    # ✅ Always use our own direct store search URL — NEVER a redirect
-                    buy_url = STORE_SEARCH_URLS[store](query)
-                    results.append({
-                        "site": store,
-                        "price": price,
-                        "link": buy_url,
-                    })
-
-                time.sleep(0.2)
-
+                        # Extract price from title + snippet
+                        price = extract_price(title + " " + body)
+                        if price:
+                            found[matched_store] = {
+                                "site":  matched_store,
+                                "price": price,
+                                # Always our own clean store URL — never redirect
+                                "link":  STORE_SEARCH_URLS[matched_store](query),
+                            }
+                except Exception:
+                    pass
+                time.sleep(0.4)
     except Exception:
         pass
 
@@ -387,8 +382,7 @@ def fetch_prices(product: dict) -> list:
     time.sleep(0.3)
     bar.empty()
 
-    # Sort cheapest first
-    return sorted(results, key=lambda x: x["price"])
+    return sorted(found.values(), key=lambda x: x["price"])
 
 
 # ── UI: Result card ───────────────────────────────────────────────────────────
@@ -409,12 +403,55 @@ def result_card(item: dict, rank: int):
 
 # ── Main App ──────────────────────────────────────────────────────────────────
 def main():
+    # ── JS: Kill Streamlit badges that CSS can't reach (iframes / shadow DOM) ──
+    st.markdown("""
+<script>
+(function hideSLBadges() {
+    var selectors = [
+        '[data-testid="stActionButton"]',
+        '[data-testid="manage-app-button"]',
+        '[data-testid="stStatusWidget"]',
+        '.viewerBadge_link__qRIco',
+        '.styles_viewerBadge__CvC9N',
+        '.viewerBadge_container__1QSob',
+        'button[kind="header"]',
+        'a[href*="streamlit.io"]',
+    ];
+    function hide() {
+        selectors.forEach(function(sel) {
+            document.querySelectorAll(sel).forEach(function(el) {
+                el.style.setProperty('display', 'none', 'important');
+            });
+        });
+        // Also hide any fixed-position elements at bottom corners (crown/M badges)
+        document.querySelectorAll('*').forEach(function(el) {
+            var st = window.getComputedStyle(el);
+            if (st.position === 'fixed' && (parseInt(st.bottom) < 80) &&
+                (parseInt(st.right) < 120 || parseInt(st.left) < 120)) {
+                var tag = el.tagName.toLowerCase();
+                if (tag === 'button' || tag === 'a' || tag === 'div') {
+                    el.style.setProperty('display', 'none', 'important');
+                }
+            }
+        });
+    }
+    hide();
+    setTimeout(hide, 500);
+    setTimeout(hide, 1500);
+    setTimeout(hide, 3000);
+    new MutationObserver(hide).observe(document.documentElement,
+        { childList: true, subtree: true });
+})();
+</script>
+""", unsafe_allow_html=True)
+
     st.markdown('<div class="ph-title">🛒 PriceHunt</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="ph-subtitle">Type a product or upload a photo '
         '→ compare prices across Indian stores instantly</div>',
         unsafe_allow_html=True
     )
+
 
     # ── API Key (only OpenRouter needed now) ──────────────────────────────────
     openrouter_key = None
