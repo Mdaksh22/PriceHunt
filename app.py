@@ -6,17 +6,17 @@ import re
 import time
 import urllib.parse
 from PIL import Image
-import requests
+from duckduckgo_search import DDGS
 
 # ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="PriceHunt – Live Price Comparison",
+    page_title="PriceHunt – Price Comparison India",
     page_icon="🛒",
     layout="centered",
     initial_sidebar_state="collapsed",
 )
 
-# ── CSS — Cream/White Theme ───────────────────────────────────────────────────
+# ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
@@ -25,6 +25,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 
 .stApp { background-color: #fdf8f2 !important; }
 .block-container { padding-top: 1.5rem !important; max-width: 820px !important; }
+
 /* ── Hide ALL Streamlit branding ── */
 #MainMenu                          { display: none !important; }
 footer                             { display: none !important; }
@@ -37,10 +38,7 @@ header                             { display: none !important; }
 [data-testid="stStatusWidget"]     { display: none !important; }
 .viewerBadge_container__1QSob     { display: none !important; }
 .styles_viewerBadge__CvC9N        { display: none !important; }
-[data-testid="stAppViewBlockContainer"] > div:last-child [data-testid="stVerticalBlock"] > div:last-child { display: none !important; }
-/* Remove top rainbow decoration line */
 .stApp > header::before            { display: none !important; }
-/* Remove bottom padding left by hidden footer */
 .stApp { padding-bottom: 0 !important; }
 
 .ph-title {
@@ -70,7 +68,6 @@ div[role="radiogroup"] label { color: #44403c !important; }
     background: #ffffff !important; border: 1.5px solid #d6c9b8 !important;
     border-radius: 10px !important; color: #1c1917 !important;
 }
-
 .stButton > button {
     background: linear-gradient(90deg, #f59e0b, #d97706) !important;
     color: #ffffff !important; border: none !important;
@@ -83,13 +80,11 @@ div[role="radiogroup"] label { color: #44403c !important; }
     background: #e5e7eb !important; color: #9ca3af !important;
     box-shadow: none !important;
 }
-
 [data-testid="stFileUploader"] {
     background: #fffbeb !important; border: 2px dashed #fbbf24 !important;
     border-radius: 12px !important; padding: 0.5rem !important;
 }
 [data-testid="stFileUploader"] label { color: #92400e !important; }
-
 .stProgress > div > div > div { background: #f59e0b !important; }
 
 .ph-card {
@@ -108,15 +103,11 @@ div[role="radiogroup"] label { color: #44403c !important; }
 .rank-4.ph-card::before { background: #f59e0b; }
 .rank-5.ph-card::before { background: #ef4444; }
 .rank-6.ph-card::before { background: #6366f1; }
-.rank-7.ph-card::before { background: #ec4899; }
-.rank-8.ph-card::before { background: #14b8a6; }
 
 .ph-card-inner { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
 .ph-rank { font-size: 1.5rem; font-weight: 800; color: #d6cfc6; min-width: 2rem; }
-.ph-thumb { width: 56px; height: 56px; object-fit: contain; border-radius: 8px; border: 1px solid #f0ece6; flex-shrink: 0; }
 .ph-info { flex: 1; min-width: 160px; }
 .ph-store { font-size: 1rem; font-weight: 700; color: #1c1917; }
-.ph-title-small { font-size: 0.78rem; color: #78716c; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
 .ph-price { font-size: 1.5rem; font-weight: 800; color: #059669; }
 .ph-best {
     display: inline-block; background: #10b981; color: #fff;
@@ -128,12 +119,12 @@ div[role="radiogroup"] label { color: #44403c !important; }
     font-weight: 700; font-size: 0.82rem; padding: 7px 18px;
     border-radius: 8px; text-decoration: none !important; white-space: nowrap;
 }
+.ph-buy:hover { background: #d97706 !important; }
 
 .ph-product {
     background: #fffbeb; border: 1.5px solid #fcd34d;
     border-radius: 12px; padding: 1rem 1.2rem; margin-bottom: 1.2rem; color: #1c1917;
 }
-
 .ph-savings {
     background: #f0fdf4; border: 1.5px solid #86efac;
     border-radius: 12px; padding: 1.2rem; text-align: center; margin-top: 1.2rem;
@@ -144,13 +135,12 @@ div[role="radiogroup"] label { color: #44403c !important; }
 .ph-chip {
     display: inline-block; background: #fef3c7; border: 1px solid #fcd34d;
     border-radius: 20px; padding: 3px 12px; font-size: 0.77rem;
-    color: #92400e; margin: 3px 3px 0 0;
+    color: #92400e; margin: 3px 3px 0 0; cursor: pointer;
 }
 .ph-hr {
     height: 1px; background: linear-gradient(90deg, transparent, #ddd, transparent);
     border: none; margin: 1.2rem 0;
 }
-
 .ph-key-card {
     background: #ffffff; border: 1.5px solid #e8ddd0; border-radius: 16px;
     padding: 2rem; max-width: 500px; margin: 2rem auto; text-align: center;
@@ -163,14 +153,7 @@ div[role="radiogroup"] label { color: #44403c !important; }
     background: #fef3c7; border-radius: 8px; padding: 0.5rem 0.8rem;
     font-size: 0.8rem; color: #92400e; margin-top: 1rem;
 }
-.ph-live-badge {
-    display: inline-block; background: #dcfce7; border: 1px solid #86efac;
-    border-radius: 20px; padding: 2px 10px; font-size: 0.72rem;
-    color: #15803d; font-weight: 600; margin-left: 6px;
-}
-
 [data-testid="stSidebar"] { background: #fdf8f2 !important; }
-[data-testid="stSidebar"] .stTextInput > div > div > input { background: #fff !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -189,62 +172,40 @@ TEXT_MODELS = [
     "qwen/qwen3-coder:free",
 ]
 
-SERPAPI_BASE = "https://serpapi.com/search"
-
-# ── Store lists ───────────────────────────────────────────────────────────────
-GROCERY_STORES    = ["Zepto", "Blinkit", "Swiggy Instamart", "BigBasket", "JioMart", "DMart Online"]
+# ── Store config — strict category separation ─────────────────────────────────
+GROCERY_STORES = ["Blinkit", "Zepto", "BigBasket", "Swiggy Instamart", "JioMart", "DMart Online"]
 ELECTRONICS_STORES = ["Amazon India", "Flipkart", "Croma", "Vijay Sales", "Reliance Digital", "Tata Cliq"]
 
-STORE_DOMAINS = {
-    "Zepto": "zeptonow.com", "Blinkit": "blinkit.com",
-    "Swiggy Instamart": "swiggy.com", "BigBasket": "bigbasket.com",
-    "JioMart": "jiomart.com", "DMart Online": "dmart.in",
-    "Amazon India": "amazon.in", "Flipkart": "flipkart.com",
-    "Croma": "croma.com", "Vijay Sales": "vijaysales.com",
-    "Reliance Digital": "reliancedigital.in", "Tata Cliq": "tatacliq.com",
+# Direct search URLs — used for every "Buy Now" button (guaranteed clean URLs, no redirects)
+STORE_SEARCH_URLS = {
+    "Blinkit":          lambda q: f"https://blinkit.com/s/?q={urllib.parse.quote_plus(q)}",
+    "Zepto":            lambda q: f"https://www.zeptonow.com/search?query={urllib.parse.quote_plus(q)}",
+    "BigBasket":        lambda q: f"https://www.bigbasket.com/ps/?q={urllib.parse.quote_plus(q)}",
+    "Swiggy Instamart": lambda q: f"https://www.swiggy.com/instamart/search?query={urllib.parse.quote_plus(q)}",
+    "JioMart":          lambda q: f"https://www.jiomart.com/search/{urllib.parse.quote_plus(q)}",
+    "DMart Online":     lambda q: f"https://www.dmart.in/search?q={urllib.parse.quote_plus(q)}",
+    "Amazon India":     lambda q: f"https://www.amazon.in/s?k={urllib.parse.quote_plus(q)}",
+    "Flipkart":         lambda q: f"https://www.flipkart.com/search?q={urllib.parse.quote_plus(q)}",
+    "Croma":            lambda q: f"https://www.croma.com/searchB?q={urllib.parse.quote_plus(q)}",
+    "Vijay Sales":      lambda q: f"https://www.vijaysales.com/search/{urllib.parse.quote_plus(q)}",
+    "Reliance Digital": lambda q: f"https://www.reliancedigital.in/search?q={urllib.parse.quote_plus(q)}",
+    "Tata Cliq":        lambda q: f"https://www.tatacliq.com/search/?text={urllib.parse.quote_plus(q)}",
 }
 
-# Exact known Indian retailer domains → display name
-STORE_NAME_MAP = {
-    "amazon.in": "Amazon India",
-    "flipkart.com": "Flipkart",
-    "croma.com": "Croma",
-    "vijaysales.com": "Vijay Sales",
-    "reliancedigital.in": "Reliance Digital",
-    "tatacliq.com": "Tata Cliq",
-    "zeptonow.com": "Zepto",
-    "blinkit.com": "Blinkit",
-    "swiggy.com": "Swiggy Instamart",
-    "bigbasket.com": "BigBasket",
-    "jiomart.com": "JioMart",
-    "dmart.in": "DMart Online",
-    "snapdeal.com": "Snapdeal",
-    "meesho.com": "Meesho",
-    "paytmmall.com": "Paytm Mall",
-    "shopclues.com": "ShopClues",
-    "nykaa.com": "Nykaa",
-    "myntra.com": "Myntra",
-}
-
-# Second-hand / resale / trade-in sites — NEVER show these
-BLACKLIST_DOMAINS = {
-    "cashify.in", "cashify.com",
-    "gameloot.in", "gameloot.com",
-    "ovantica.com",
-    "addmecart.com",
-    "olx.in", "olx.com",
-    "quikr.com",
-    "ebay.in", "ebay.com",
-    "2gud.com",
-    "budli.in",
-    "togofogo.com",
-    "doorm.in",
-    "greendust.com",
-    "overcart.com",
-    "shopclues.com",  # often has dubious listings
-    "shopsy.in",
-    "glowroad.com",
-    "limeroad.com",
+# DuckDuckGo site: filter domains — for price searching
+STORE_DDG_DOMAINS = {
+    "Blinkit":          "blinkit.com",
+    "Zepto":            "zeptonow.com",
+    "BigBasket":        "bigbasket.com",
+    "Swiggy Instamart": "swiggy.com",
+    "JioMart":          "jiomart.com",
+    "DMart Online":     "dmart.in",
+    "Amazon India":     "amazon.in",
+    "Flipkart":         "flipkart.com",
+    "Croma":            "croma.com",
+    "Vijay Sales":      "vijaysales.com",
+    "Reliance Digital": "reliancedigital.in",
+    "Tata Cliq":        "tatacliq.com",
 }
 
 
@@ -253,7 +214,6 @@ def make_client(api_key: str) -> OpenAI:
 
 
 def ai_call(client: OpenAI, messages: list, is_vision: bool = False) -> str:
-    """Call OpenRouter API with automatic model fallback on 429 rate limits."""
     fallback_list = list(VISION_MODELS if is_vision else TEXT_MODELS)
     last_error = None
     for m in fallback_list:
@@ -269,40 +229,42 @@ def ai_call(client: OpenAI, messages: list, is_vision: bool = False) -> str:
             return content.strip()
         except Exception as e:
             last_error = e
-            err_str = str(e)
-            if "429" in err_str or "404" in err_str or "NoneType" in err_str:
+            if "429" in str(e) or "404" in str(e) or "NoneType" in str(e):
                 time.sleep(0.5)
                 continue
             else:
                 raise
-    raise last_error or Exception("All free models are currently rate-limited. Please try again in a minute.")
+    raise last_error or Exception("All free models rate-limited. Try again in a minute.")
 
 
-def build_search_url(store: str, q: str) -> str:
-    enc = urllib.parse.quote_plus(q)
-    urls = {
-        "Zepto":            f"https://www.zeptonow.com/search?query={enc}",
-        "Blinkit":          f"https://blinkit.com/s/?q={enc}",
-        "Swiggy Instamart": f"https://www.swiggy.com/instamart/search?query={enc}",
-        "BigBasket":        f"https://www.bigbasket.com/ps/?q={enc}",
-        "JioMart":          f"https://www.jiomart.com/search/{enc}",
-        "DMart Online":     f"https://www.dmart.in/search?q={enc}",
-        "Amazon India":     f"https://www.amazon.in/s?k={enc}",
-        "Flipkart":         f"https://www.flipkart.com/search?q={enc}",
-        "Croma":            f"https://www.croma.com/searchB?q={enc}",
-        "Vijay Sales":      f"https://www.vijaysales.com/search/{enc}",
-        "Reliance Digital": f"https://www.reliancedigital.in/search?q={enc}",
-        "Tata Cliq":        f"https://www.tatacliq.com/search/?text={enc}",
-    }
-    return urls.get(store, f"https://www.google.com/search?q={enc}+{store}")
-
-
-def parse_json_response(raw: str):
+def parse_json_response(raw: str) -> dict:
     cleaned = re.sub(r'```(?:json)?\s*\n?', '', raw.strip()).strip()
     m = re.search(r'\{.*\}', cleaned, re.DOTALL)
     if m:
         return json.loads(m.group(0))
     return json.loads(cleaned)
+
+
+def extract_price(text: str):
+    """Extract the first reasonable INR price from text."""
+    patterns = [
+        r'₹\s*([\d,]+(?:\.\d{1,2})?)',
+        r'Rs\.?\s*([\d,]+(?:\.\d{1,2})?)',
+        r'INR\s*([\d,]+(?:\.\d{1,2})?)',
+        r'MRP[:\s]*₹?\s*([\d,]+(?:\.\d{1,2})?)',
+        r'"price"\s*:\s*"?([\d,.]+)',
+        r'"selling_price"\s*:\s*"?([\d,.]+)',
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            try:
+                p = float(m.group(1).replace(",", ""))
+                if 50 < p < 10_000_000:
+                    return p
+            except ValueError:
+                pass
+    return None
 
 
 # ── AI: Identify product from IMAGE ──────────────────────────────────────────
@@ -345,244 +307,102 @@ Return ONLY a raw JSON object, no markdown:
   "search_query": "specific search query for Indian e-commerce price comparison",
   "store_category": "grocery_stores or electronics_stores"
 }}
-If category is Grocery/Food → grocery_stores. If Electronics/Gadgets → electronics_stores. Else infer from product name."""
+Grocery/Food → grocery_stores. Electronics/Gadgets/Phones/Laptops → electronics_stores."""
 
     raw = ai_call(client, [{"role": "user", "content": prompt}])
     return parse_json_response(raw)
 
 
-# ── SerpAPI: Google Shopping price search ────────────────────────────────────
-def _is_blacklisted(source: str, link: str) -> bool:
-    """Return True if the result is from a blacklisted resale/second-hand site."""
-    combined = (source + " " + link).lower()
-    return any(bd in combined for bd in BLACKLIST_DOMAINS)
-
-
-def _normalize_store(source_name: str, link: str) -> str | None:
-    """Map a result source/link to a known trusted store name. Returns None if unknown."""
-    combined = (source_name + " " + link).lower()
-    for domain, name in STORE_NAME_MAP.items():
-        if domain in combined:
-            return name
-    return None  # Unknown store — will be filtered out
-
-
-def _is_title_relevant(title: str, query: str) -> bool:
-    """Basic check: at least 40% of query words appear in the title."""
-    if not title or not query:
-        return True  # can't judge, allow through
-    query_words = [w for w in query.lower().split() if len(w) > 2]
-    if not query_words:
-        return True
-    title_lower = title.lower()
-    matches = sum(1 for w in query_words if w in title_lower)
-    return (matches / len(query_words)) >= 0.4
-
-
-def serpapi_google_shopping(query: str, serpapi_key: str, gl: str = "in", hl: str = "en") -> list:
+# ── DuckDuckGo per-store price search ────────────────────────────────────────
+def _ddg_price_for_store(ddgs: DDGS, store: str, query: str) -> float | None:
     """
-    Use SerpAPI Google Shopping to get real live prices from trusted Indian retailers.
-    Filters out: second-hand/resale sites, unknown stores, irrelevant products.
+    Search DuckDuckGo restricted to a single store's domain and extract a price.
+    Uses multiple query strategies for best hit rate.
     """
-    # Append "new" to avoid resale/trade-in listings
-    search_q = f"{query} new"
-    params = {
-        "engine": "google_shopping",
-        "q": search_q,
-        "api_key": serpapi_key,
-        "gl": gl,       # country = India
-        "hl": hl,       # language = English
-        "num": "40",    # fetch more so we have enough after filtering
-        "tbs": "new",   # Google Shopping filter: new products only
-    }
-    try:
-        resp = requests.get(SERPAPI_BASE, params=params, timeout=15)
-        if resp.status_code == 401:
-            raise ValueError("Invalid SerpAPI key. Please check your key.")
-        if resp.status_code == 429:
-            raise ValueError("SerpAPI monthly limit reached. Upgrade plan or wait for reset.")
-        if resp.status_code != 200:
-            raise ValueError(f"SerpAPI error: HTTP {resp.status_code}")
-        data = resp.json()
-        seen_stores = {}
+    domain = STORE_DDG_DOMAINS.get(store, "")
+    if not domain:
+        return None
 
-        shopping_results = data.get("shopping_results", [])
-        for item in shopping_results:
-            source = item.get("source", "") or ""
-            link   = item.get("link", "")   or ""
-            title  = item.get("title", "")  or ""
+    # Try progressively broader queries
+    queries = [
+        f'site:{domain} "{query}" price',
+        f'site:{domain} {query} ₹',
+        f'site:{domain} {query} buy',
+    ]
 
-            # ── Filter 1: skip blacklisted resale/second-hand sites
-            if _is_blacklisted(source, link):
-                continue
-
-            # ── Filter 2: only accept known trusted Indian retailers
-            store = _normalize_store(source, link)
-            if not store:
-                continue  # unknown store — skip entirely
-
-            # ── Filter 3: basic title relevance check
-            if not _is_title_relevant(title, query):
-                continue
-
-            # ── Parse price — handles ₹1,299 / Rs.1299 / 1299.00
-            price_str   = item.get("price", "") or ""
-            price_clean = re.sub(r'[^\d.]', '', price_str)
-            # If multiple dots, keep only the first
-            parts = price_clean.split('.')
-            price_clean = parts[0] + ('.' + parts[1] if len(parts) > 1 else '')
-            try:
-                price = float(price_clean) if price_clean else None
-            except ValueError:
-                price = None
-
-            if not price or price < 100 or price > 10_000_000:
-                continue
-
-            thumbnail = item.get("thumbnail", "") or ""
-
-            # Keep only the cheapest listing per store
-            if store not in seen_stores or price < seen_stores[store]["price"]:
-                seen_stores[store] = {
-                    "site": store,
-                    "price": price,
-                    "title": title,
-                    "thumbnail": thumbnail,
-                    "link": link,
-                    "live": True,
-                }
-
-        return sorted(seen_stores.values(), key=lambda x: x["price"])
-
-    except (requests.RequestException, ValueError) as e:
-        raise
-
-
-def serpapi_google_search(query: str, serpapi_key: str) -> list:
-    """
-    Fallback: Google Search restricted to known Indian retailer domains.
-    """
-    # Build site: query targeting only known retailers
-    trusted_domains = list(STORE_NAME_MAP.keys())
-    site_filter = " OR ".join(f"site:{d}" for d in trusted_domains[:8])
-    search_q = f"({site_filter}) {query} buy new price"
-
-    params = {
-        "engine": "google",
-        "q": search_q,
-        "api_key": serpapi_key,
-        "gl": "in",
-        "hl": "en",
-        "num": "10",
-    }
-    try:
-        resp = requests.get(SERPAPI_BASE, params=params, timeout=15)
-        if resp.status_code != 200:
-            return []
-        data = resp.json()
-        seen_stores = {}
-
-        organic = data.get("organic_results", [])
-        for item in organic:
-            link    = item.get("link", "")    or ""
-            snippet = item.get("snippet", "") or ""
-            title   = item.get("title", "")   or ""
-
-            # Skip blacklisted sites even in organic results
-            if _is_blacklisted("", link):
-                continue
-
-            store = _normalize_store("", link)
-            if not store:
-                continue
-
-            combined = snippet + " " + title
-            m = re.search(r'[₹]\s*([\d,]+(?:\.\d{1,2})?)', combined)
-            if not m:
-                continue
-            try:
-                price = float(m.group(1).replace(",", ""))
-            except ValueError:
-                continue
-            if price < 100 or price > 10_000_000:
-                continue
-
-            if store not in seen_stores or price < seen_stores[store]["price"]:
-                seen_stores[store] = {
-                    "site": store,
-                    "price": price,
-                    "title": title,
-                    "thumbnail": "",
-                    "link": link,
-                    "live": True,
-                }
-
-        return sorted(seen_stores.values(), key=lambda x: x["price"])
-    except Exception:
-        return []
-
-
-# ── Main price fetcher ───────────────────────────────────────────────────────
-def fetch_prices(product: dict, serpapi_key: str) -> list:
-    """
-    Fetch live prices via SerpAPI Google Shopping.
-    Primary: Google Shopping engine (returns actual store prices)
-    Fallback: Google Search with price snippets
-    """
-    query = product.get("search_query", product.get("name", ""))
-    query_india = f"{query} India"
-
-    bar = st.progress(0, text="🔍 Searching Google Shopping for live prices…")
-
-    try:
-        bar.progress(30, text="🛍️ Fetching Google Shopping results…")
-        results = serpapi_google_shopping(query_india, serpapi_key)
-        bar.progress(70, text="📊 Processing results…")
-
-        if not results:
-            # Fallback to regular Google search
-            bar.progress(80, text="🔎 Trying Google Search fallback…")
-            results = serpapi_google_search(query_india, serpapi_key)
-
-        bar.progress(100, text="✅ Done!")
-        time.sleep(0.3)
-        bar.empty()
-        return results[:8]
-
-    except ValueError as e:
-        bar.empty()
-        raise
-    except Exception as e:
-        bar.empty()
-        # Fallback to regular Google search
+    for q in queries:
         try:
-            results = serpapi_google_search(query_india, serpapi_key)
-            return results[:8]
+            for r in ddgs.text(q, max_results=8):
+                combined = (
+                    r.get("title", "") + " " +
+                    r.get("body", "") + " " +
+                    r.get("href", "")
+                )
+                price = extract_price(combined)
+                if price:
+                    return price
+            time.sleep(0.2)
         except Exception:
-            return []
+            time.sleep(0.3)
+
+    return None
+
+
+# ── Main price fetcher ────────────────────────────────────────────────────────
+def fetch_prices(product: dict) -> list:
+    """
+    Fetch prices using DuckDuckGo, one query per store.
+    Buy Now links are ALWAYS our own direct store search URLs — never DDG/redirect URLs.
+    """
+    stores = (GROCERY_STORES if product.get("store_category") == "grocery_stores"
+              else ELECTRONICS_STORES)
+    query = product.get("search_query", product.get("name", ""))
+
+    results = []
+    bar = st.progress(0, text="🔍 Searching stores…")
+
+    try:
+        with DDGS() as ddgs:
+            for i, store in enumerate(stores):
+                pct = int((i / len(stores)) * 100)
+                bar.progress(pct, text=f"🔎 Checking {store}…")
+
+                price = _ddg_price_for_store(ddgs, store, query)
+
+                if price:
+                    # ✅ Always use our own direct store search URL — NEVER a redirect
+                    buy_url = STORE_SEARCH_URLS[store](query)
+                    results.append({
+                        "site": store,
+                        "price": price,
+                        "link": buy_url,
+                    })
+
+                time.sleep(0.2)
+
+    except Exception:
+        pass
+
+    bar.progress(100, text="✅ Done!")
+    time.sleep(0.3)
+    bar.empty()
+
+    # Sort cheapest first
+    return sorted(results, key=lambda x: x["price"])
 
 
 # ── UI: Result card ───────────────────────────────────────────────────────────
 def result_card(item: dict, rank: int):
     best = '<span class="ph-best">BEST PRICE</span>' if rank == 1 else ""
-    live_badge = '<span class="ph-live-badge">🟢 LIVE</span>'
-    thumb_html = ""
-    if item.get("thumbnail"):
-        thumb_html = f'<img src="{item["thumbnail"]}" class="ph-thumb" alt="product" onerror="this.style.display=\'none\'">'
-    title_short = (item.get("title", "") or "")[:80]
-    title_html = f'<div class="ph-title-small">{title_short}</div>' if title_short else ""
-
     st.markdown(f"""
 <div class="ph-card rank-{rank}">
   <div class="ph-card-inner">
     <div class="ph-rank">#{rank}</div>
-    {thumb_html}
     <div class="ph-info">
-      <div class="ph-store">{item['site']}{best}{live_badge}</div>
-      {title_html}
+      <div class="ph-store">{item['site']}{best}</div>
       <div class="ph-price">₹{item['price']:,.0f}</div>
     </div>
-    <a href="{item['link']}" target="_blank" class="ph-buy">Buy Now →</a>
+    <a href="{item['link']}" target="_blank" rel="noopener noreferrer" class="ph-buy">Buy Now →</a>
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -591,67 +411,55 @@ def result_card(item: dict, rank: int):
 def main():
     st.markdown('<div class="ph-title">🛒 PriceHunt</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="ph-subtitle">Type a product name or upload a photo '
-        '→ Find live prices across Indian stores via Google Shopping</div>',
+        '<div class="ph-subtitle">Type a product or upload a photo '
+        '→ compare prices across Indian stores instantly</div>',
         unsafe_allow_html=True
     )
 
-    # ── API Keys ───────────────────────────────────────────────────────────────
+    # ── API Key (only OpenRouter needed now) ──────────────────────────────────
     openrouter_key = None
-    serpapi_key = None
-
     try:
         openrouter_key = st.secrets.get("OPENROUTER_API_KEY")
-        serpapi_key = st.secrets.get("SERPAPI_KEY")
     except Exception:
         pass
 
     with st.sidebar:
-        st.markdown("### 🔑 API Keys")
+        st.markdown("### 🔑 OpenRouter API Key")
         if not openrouter_key:
-            openrouter_key = st.text_input("OpenRouter Key", type="password",
-                                            placeholder="sk-or-v1-...",
-                                            help="Free at openrouter.ai/keys")
-            st.caption("[Get free OpenRouter key →](https://openrouter.ai/keys)")
+            openrouter_key = st.text_input(
+                "OpenRouter Key", type="password",
+                placeholder="sk-or-v1-...",
+                help="Free key at openrouter.ai/keys"
+            )
+            st.caption("[Get free key →](https://openrouter.ai/keys)  No credit card needed")
         else:
             st.success("✅ OpenRouter key loaded")
 
-        if not serpapi_key:
-            serpapi_key = st.text_input("SerpAPI Key", type="password",
-                                         placeholder="Your SerpAPI key…",
-                                         help="250 free searches/month at serpapi.com")
-            st.caption("[Get free SerpAPI key →](https://serpapi.com/users/sign_up) · 250 free/month · No credit card")
-        else:
-            st.success("✅ SerpAPI key loaded")
-
         st.markdown("---")
-        st.markdown("**Why SerpAPI?**")
-        st.markdown("- ✅ Real live prices from Google Shopping\n- ✅ 250 free searches/month\n- ✅ No credit card needed\n- ✅ Works for all Indian stores")
+        st.markdown("**How it works**")
+        st.markdown(
+            "- 🤖 AI identifies your product\n"
+            "- 🔍 Searches each store directly\n"
+            "- 🛒 Shows cheapest prices\n"
+            "- ✅ No API key for price search\n"
+            "- 🔗 Buy Now → goes direct to store"
+        )
 
-    # Show key setup instructions if missing
-    missing_keys = []
     if not openrouter_key:
-        missing_keys.append("openrouter")
-    if not serpapi_key:
-        missing_keys.append("serpapi")
-
-    if missing_keys:
         st.markdown("""
 <div class="ph-key-card">
   <div style="font-size:2.5rem;">🔑</div>
-  <h3>Set Up Your FREE API Keys</h3>
-  <ol>""" + ("""
-    <li><strong>OpenRouter</strong> (for AI product identification):<br>
-      Go to <a href="https://openrouter.ai/keys" target="_blank">openrouter.ai/keys</a> → Sign in (Google/GitHub) → Create Key</li>""" if "openrouter" in missing_keys else "") + ("""
-    <li><strong>SerpAPI</strong> (for live Google Shopping prices):<br>
-      Go to <a href="https://serpapi.com/users/sign_up" target="_blank">serpapi.com</a> → Sign up free → Copy API key<br>
-      <em>250 free searches/month · No credit card required</em></li>""" if "serpapi" in missing_keys else "") + """
+  <h3>Get Your FREE OpenRouter API Key</h3>
+  <ol>
+    <li>Go to <a href="https://openrouter.ai/keys" target="_blank">openrouter.ai/keys</a></li>
+    <li>Sign in with Google or GitHub (free)</li>
+    <li>Click <strong>Create Key</strong></li>
+    <li>Paste it in the sidebar 👈</li>
   </ol>
   <div class="ph-free-note">
-    ✅ Both services are 100% Free &nbsp;·&nbsp; No credit card needed &nbsp;·&nbsp; Real live prices from Google Shopping
+    ✅ 100% Free &nbsp;·&nbsp; No credit card &nbsp;·&nbsp; No SerpAPI needed
   </div>
 </div>""", unsafe_allow_html=True)
-        st.info("👈 Enter your API keys in the sidebar to get started")
         st.stop()
 
     client = make_client(openrouter_key)
@@ -669,7 +477,7 @@ def main():
             with c1:
                 text_query = st.text_input(
                     "product",
-                    placeholder="e.g.  Tropicana Orange Juice 1L  or  HP Victus i5 Laptop",
+                    placeholder="e.g.  Maggi Noodles 12-pack  or  OnePlus Nord CE 5",
                     label_visibility="collapsed"
                 )
             with c2:
@@ -685,7 +493,7 @@ def main():
   <span class="ph-chip">📱 Samsung Galaxy S24</span>
   <span class="ph-chip">🧴 Dove Shampoo 650ml</span>
 </div>""", unsafe_allow_html=True)
-            go = st.form_submit_button("🔍 Find Live Prices", use_container_width=True)
+            go = st.form_submit_button("🔍 Find Best Prices", use_container_width=True)
         can_search = bool(text_query and text_query.strip()) and go
     else:
         c1, c2 = st.columns([1, 1])
@@ -699,7 +507,7 @@ def main():
                 st.image(Image.open(uploaded_file), use_container_width=True)
         st.markdown("")
         can_search = bool(uploaded_file)
-        go = st.button("🔍 Find Live Prices", disabled=not can_search, use_container_width=True)
+        go = st.button("🔍 Find Best Prices", disabled=not can_search, use_container_width=True)
         can_search = can_search and go
 
     if not can_search:
@@ -712,24 +520,14 @@ def main():
             ("📱", "Electronics", "Amazon · Flipkart · Croma · Vijay Sales"),
             ("🏠", "Home & FMCG", "Swiggy Instamart · DMart · Reliance"),
         ]
-        for col, (em, title, stores_list) in zip([d1, d2, d3], tiles):
+        for col, (em, title, stores_txt) in zip([d1, d2, d3], tiles):
             with col:
                 st.markdown(f"""
 <div style="background:#fff;border:1.5px solid #e8ddd0;border-radius:12px;
             padding:1rem;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,0.04);">
   <div style="font-size:1.8rem;">{em}</div>
   <div style="font-weight:700;color:#1c1917;margin:0.3rem 0;">{title}</div>
-  <div style="font-size:0.75rem;color:#78716c;">{stores_list}</div>
-</div>""", unsafe_allow_html=True)
-
-        st.markdown('<hr class="ph-hr">', unsafe_allow_html=True)
-        st.markdown("""
-<div style="text-align:center;padding:0.5rem;">
-  <span style="font-size:0.85rem;color:#78716c;">
-    🟢 <strong>Live prices</strong> via Google Shopping &nbsp;·&nbsp;
-    🤖 <strong>AI product recognition</strong> &nbsp;·&nbsp;
-    📸 <strong>Image search</strong> supported
-  </span>
+  <div style="font-size:0.75rem;color:#78716c;">{stores_txt}</div>
 </div>""", unsafe_allow_html=True)
         return
 
@@ -760,6 +558,11 @@ def main():
     # Show product info
     cat_emoji = {"grocery": "🛒", "electronics": "📱", "fashion": "👗",
                  "home": "🏠", "beauty": "💄"}.get(product.get("category", ""), "📦")
+    stores_label = (
+        "Blinkit, Zepto, BigBasket, Swiggy Instamart, JioMart, DMart"
+        if product.get("store_category") == "grocery_stores"
+        else "Amazon, Flipkart, Croma, Vijay Sales, Reliance Digital, Tata Cliq"
+    )
 
     st.markdown(f"""
 <div class="ph-product">
@@ -768,39 +571,34 @@ def main():
     Brand: <strong>{product.get('brand') or '—'}</strong> &nbsp;·&nbsp;
     Variant: <strong>{product.get('variant') or '—'}</strong>
   </div>
-  <div style="font-size:0.8rem;margin-top:0.3rem;color:#92400e;">
-    🔍 Search query: <em>{product.get('search_query', '—')}</em>
-  </div>
+  <div style="font-size:0.8rem;margin-top:0.3rem;color:#92400e;">🏪 Searching: {stores_label}</div>
 </div>""", unsafe_allow_html=True)
 
     # Fetch & show prices
-    st.markdown('<div class="ph-section">Live Price Comparison — Google Shopping</div>', unsafe_allow_html=True)
-
-    try:
-        results = fetch_prices(product, serpapi_key)
-    except ValueError as e:
-        st.error(f"❌ SerpAPI Error: {e}")
-        return
-    except Exception as e:
-        st.error(f"❌ Could not fetch prices: {e}")
-        return
+    st.markdown('<div class="ph-section">Price Comparison — Cheapest First</div>', unsafe_allow_html=True)
+    results = fetch_prices(product)
 
     if not results:
         query = product.get("search_query", product.get("name", ""))
-        st.warning("😕 No prices found on Google Shopping. Try a more specific product name.")
-        stores = GROCERY_STORES if product.get("store_category") == "grocery_stores" else ELECTRONICS_STORES
+        stores = (GROCERY_STORES if product.get("store_category") == "grocery_stores"
+                  else ELECTRONICS_STORES)
+        st.warning("😕 Could not fetch prices automatically. Browse stores directly:")
         links_html = ""
         for store in stores:
-            url = build_search_url(store, query)
-            links_html += f'<a href="{url}" target="_blank" style="display:inline-block;background:#fef3c7;border:1px solid #fcd34d;border-radius:20px;padding:5px 14px;font-size:0.82rem;color:#92400e;text-decoration:none;margin:4px;">🔗 {store}</a>\n'
+            url = STORE_SEARCH_URLS[store](query)
+            links_html += (
+                f'<a href="{url}" target="_blank" rel="noopener noreferrer" '
+                f'style="display:inline-block;background:#fef3c7;border:1px solid #fcd34d;'
+                f'border-radius:20px;padding:5px 14px;font-size:0.82rem;color:#92400e;'
+                f'text-decoration:none;margin:4px;">🔗 {store}</a>\n'
+            )
         st.markdown(f'<div style="margin-top:0.5rem;">{links_html}</div>', unsafe_allow_html=True)
-        st.info('💡 Tip: Be specific — try "Samsung Galaxy S24 Ultra 256GB" instead of "Samsung phone"')
+        st.info('💡 Tip: Be specific — "Samsung Galaxy S24 Ultra 256GB" not "Samsung phone"')
         return
 
     st.markdown(
         f'<div style="color:#78716c;font-size:0.88rem;margin-bottom:0.8rem;">'
-        f'Found <strong style="color:#1c1917;">{len(results)} listings</strong> '
-        f'with live prices from Google Shopping</div>',
+        f'Found prices at <strong style="color:#1c1917;">{len(results)} stores</strong></div>',
         unsafe_allow_html=True
     )
 
@@ -822,8 +620,7 @@ def main():
 
     st.markdown(
         '<div style="text-align:center;color:#b8a99a;font-size:0.74rem;margin-top:1rem;">'
-        '✅ Prices fetched live from Google Shopping. '
-        'Prices may vary — verify on the retailer\'s website before purchasing.</div>',
+        '⚠️ Prices sourced via web search. Always verify on the store before purchasing.</div>',
         unsafe_allow_html=True
     )
 
