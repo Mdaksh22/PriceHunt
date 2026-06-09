@@ -198,10 +198,10 @@ STORE_SEARCH_URLS = {
     "DMart Online":     lambda q: f"https://www.dmart.in/search?q={urllib.parse.quote_plus(q)}",
     "Amazon India":     lambda q: f"https://www.amazon.in/s?k={urllib.parse.quote_plus(q)}",
     "Flipkart":         lambda q: f"https://www.flipkart.com/search?q={urllib.parse.quote_plus(q)}",
-    "Croma":            lambda q: f"https://www.croma.com/searchB?q={urllib.parse.quote_plus(q)}",
-    "Vijay Sales":      lambda q: f"https://www.vijaysales.com/search/{urllib.parse.quote_plus(q)}",
-    "Reliance Digital": lambda q: f"https://www.reliancedigital.in/search?q={urllib.parse.quote_plus(q)}",
-    "Tata Cliq":        lambda q: f"https://www.tatacliq.com/search/?text={urllib.parse.quote_plus(q)}",
+    "Croma":            lambda q: f"https://www.croma.com/search/?text={urllib.parse.quote_plus(q)}",
+    "Vijay Sales":      lambda q: f"https://www.vijaysales.com/search?q={urllib.parse.quote_plus(q)}",
+    "Reliance Digital": lambda q: f"https://www.reliancedigital.in/products?q={urllib.parse.quote_plus(q)}",
+    "Tata Cliq":        lambda q: f"https://www.tatacliq.com/search/?searchCategory=all&text={urllib.parse.quote_plus(q)}",
 }
 
 # ── HTTP headers — mimic a real browser ─────────────────────────────────────
@@ -678,14 +678,15 @@ def _ai_extract_price(client: OpenAI, store: str, query: str, snippets: list[str
 
 {combined}
 
-Extract the current selling price in Indian Rupees. Return ONLY a plain number (no symbols, no commas, no text), e.g. 24999
-If no clear selling price is found, return: null"""
+Extract the current selling price in Indian Rupees for the EXACT product '{query}'.
+IMPORTANT: Only extract the price if the snippets clearly refer to '{query}' (not a different product, not an accessory).
+Return ONLY a plain number (no symbols, no commas, no text), e.g. 24999
+If the snippets don't contain a clear price for this exact product, return: null"""
     try:
         raw = ai_call(client, [{"role": "user", "content": prompt}])
         raw = raw.strip().replace(",", "").replace("₹", "").replace("Rs", "").strip()
         if raw.lower() == "null" or not raw:
             return None
-        # Extract first number
         m = re.search(r'\d+(?:\.\d{1,2})?', raw)
         if m:
             p = float(m.group(0))
@@ -696,20 +697,55 @@ If no clear selling price is found, return: null"""
     return None
 
 
+def _ai_get_price_direct(client: OpenAI, query: str, store_name: str,
+                          store_category: str) -> tuple[float | None, bool]:
+    """Ask the AI directly for the product price on a specific store.
+    Returns (price, is_available) — is_available is False if the product
+    doesn't exist on that store (e.g. OnePlus Nord CE 6 on Tata Cliq)."""
+    if not client:
+        return None, True
+
+    prompt = f"""You are a price comparison assistant for India.
+Product: {query}
+Store: {store_name}
+
+Answer these 2 questions:
+1. Is '{query}' actually sold on {store_name} in India? (yes/no)
+2. What is the approximate current selling price in INR on {store_name}?
+
+RULES:
+- If the product does NOT exist or is NOT sold on {store_name}, respond: NOT_AVAILABLE
+- If you're not sure about the exact price, give your best estimate based on the product's general market price in India.
+- Return ONLY in this format: PRICE:<number> or NOT_AVAILABLE
+- Examples: PRICE:31610 or PRICE:24999 or NOT_AVAILABLE"""
+
+    try:
+        raw = ai_call(client, [{"role": "user", "content": prompt}])
+        raw = raw.strip().upper()
+        if "NOT_AVAILABLE" in raw:
+            return None, False
+        m = re.search(r'PRICE\s*:\s*(\d+)', raw.replace(",", ""))
+        if m:
+            p = float(m.group(1))
+            if 5 < p < 10_000_000:
+                return p, True
+    except Exception:
+        pass
+    return None, True
+
+
 def _fetch_store_price(store_name: str, query: str, client: OpenAI,
-                       store_category: str) -> tuple[str, float | None, str | None]:
-    """Fetch price for a single store using:
-    1. Simple DDG search -> regex price extraction
-    2. If no price found -> AI extraction from snippets
-    Returns (store_name, price, link)."""
+                       store_category: str) -> tuple[str, float | None, str | None, bool]:
+    """Fetch price for a single store.
+    Returns (store_name, price, link, is_available).
+    is_available=False means the product doesn't exist on this store."""
     domain = STORE_SITE_DOMAINS.get(store_name, "")
     search_url = STORE_SEARCH_URLS[store_name](query)
 
-    # Try multiple simple query variations - simple queries avoid DDG rate limits
+    # Try DDG search with simple queries
     query_variations = [
         f"{query} price {domain}",
         f"{query} {store_name} India price",
-        f"buy {query} {domain}",
     ]
 
     best_link = search_url
@@ -717,16 +753,13 @@ def _fetch_store_price(store_name: str, query: str, client: OpenAI,
     price_from_regex = None
 
     for q in query_variations:
-        results = _ddg_search_simple(q, max_results=6)
+        results = _ddg_search_simple(q, max_results=6, retries=1)
         for r in results:
             title = r.get("title", "")
             snippet = r.get("snippet", "")
             link = r.get("link", "")
 
-            # Only use results actually from this store's domain
             is_from_store = domain and domain in link.lower()
-
-            # Filter out accessories
             combined = f"{title} {snippet}"
             if _is_accessory_result(combined, query):
                 continue
@@ -734,32 +767,39 @@ def _fetch_store_price(store_name: str, query: str, client: OpenAI,
             if is_from_store:
                 best_link = link
                 all_snippets.append(f"{title}. {snippet}")
-                # Try regex price extraction first
                 p = extract_price(title) or extract_price(snippet)
                 if p and _price_in_bounds(p, store_category):
                     price_from_regex = p
             else:
-                # Still collect snippet for AI if it mentions the store
                 store_lower = store_name.lower().split()[0]
                 if store_lower in combined.lower() or domain in combined.lower():
                     all_snippets.append(f"{title}. {snippet}")
 
         if price_from_regex:
-            break  # Got a price, no need for more queries
+            break
         if all_snippets:
-            break  # Got snippets, try AI extraction
+            break
 
-    # If regex found price, return it
+    # If regex found a price from a store-specific page, use it
     if price_from_regex:
-        return store_name, price_from_regex, best_link
+        return store_name, price_from_regex, best_link, True
 
-    # Try AI extraction from collected snippets
+    # Try AI extraction from DDG snippets
     if all_snippets and client:
         ai_price = _ai_extract_price(client, store_name, query, all_snippets)
         if ai_price and _price_in_bounds(ai_price, store_category):
-            return store_name, ai_price, best_link
+            return store_name, ai_price, best_link, True
 
-    return store_name, None, best_link
+    # Final fallback: ask AI directly for price + availability check
+    if client:
+        ai_price, is_available = _ai_get_price_direct(client, query, store_name, store_category)
+        if not is_available:
+            return store_name, None, best_link, False
+        if ai_price and _price_in_bounds(ai_price, store_category):
+            return store_name, ai_price, best_link, True
+
+    return store_name, None, best_link, True
+
 
 
 
@@ -778,7 +818,8 @@ def fetch_prices(product: dict, client: OpenAI = None) -> list:
     1. Simple DDG queries per store (no complex operators = no rate limits)
     2. Regex price extraction from snippets first
     3. AI-powered extraction as fallback (uses OpenRouter)
-    4. Direct store search URL always provided for Buy Now links
+    4. AI validates product availability — skips stores that don't carry the product
+    5. Direct store search URL always provided for Buy Now links
     """
     store_category = product.get("store_category", "electronics_stores")
     category_stores = (GROCERY_STORES if store_category == "grocery_stores"
@@ -798,10 +839,15 @@ def fetch_prices(product: dict, client: OpenAI = None) -> list:
     with ThreadPoolExecutor(max_workers=min(6, total_stores)) as ex:
         futures = {ex.submit(fetch_one, s): s for s in category_stores}
         for future in as_completed(futures):
-            store_name, price, link = future.result()
+            store_name, price, link, is_available = future.result()
             done_count += 1
             pct = 5 + int(done_count / total_stores * 90)
             bar.progress(pct, text=f"✅ {done_count}/{total_stores} stores searched…")
+
+            # Skip stores where the product isn't available
+            if not is_available:
+                continue
+
             found_stores[store_name] = {
                 "site": store_name,
                 "link": link or STORE_SEARCH_URLS[store_name](query),
