@@ -9,7 +9,10 @@ from PIL import Image
 import requests
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from ddgs import DDGS
+import warnings
+warnings.filterwarnings("ignore", message=".*langchain-community.*being sunset.*")
+from langchain_community.tools import DuckDuckGoSearchResults
+from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
 
 # ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -445,6 +448,157 @@ def _scrape_generic_direct(url: str) -> float | None:
     return price
 
 
+# ── Native search page scrapers (bypass DuckDuckGo for accuracy) ────────────
+def _scrape_amazon_search(query: str) -> dict | None:
+    """Scrape Amazon India search results page for the first matching product and price."""
+    url = f"https://www.amazon.in/s?k={urllib.parse.quote_plus(query)}"
+    r = _get(url, timeout=15)
+    if not r:
+        return None
+    soup = BeautifulSoup(r.text, "html.parser")
+    
+    # Find product cards in search results
+    cards = soup.select("div[data-component-type='s-search-result']")
+    if not cards:
+        # Fallback: look for result items
+        cards = soup.select("div.s-result-item[data-asin]")
+    
+    accessory_words = [
+        "cover", "case", "glass", "protector", "guard", "cable", "charger",
+        "adapter", "strap", "pouch", "film", "skin", "sleeve", "tempered",
+        "holder", "stand", "mount", "ring", "grip", "sticker", "decal"
+    ]
+    query_lower = query.lower()
+    
+    for card in cards[:10]:  # Check top 10 results
+        # Skip sponsored/ad results
+        if card.select_one("span.s-label-popover-default"):
+            continue
+        asin = card.get("data-asin", "")
+        if not asin:
+            continue
+        
+        # Get the title
+        title_el = card.select_one("h2 a span") or card.select_one("h2 span") or card.select_one(".a-text-normal")
+        title = title_el.get_text(strip=True) if title_el else ""
+        title_lower = title.lower()
+        
+        # Skip accessories
+        is_accessory = False
+        for kw in accessory_words:
+            if kw in title_lower and kw not in query_lower:
+                is_accessory = True
+                break
+        if is_accessory:
+            continue
+        
+        # Extract price
+        price_el = (card.select_one("span.a-price span.a-offscreen") or
+                    card.select_one("span.a-price-whole") or
+                    card.select_one("span.a-color-price"))
+        if price_el:
+            price = extract_price(price_el.get_text())
+            if price:
+                # Build product URL
+                link_el = card.select_one("h2 a")
+                product_link = f"https://www.amazon.in/dp/{asin}" if asin else url
+                if link_el and link_el.get("href"):
+                    href = link_el["href"]
+                    if not href.startswith("http"):
+                        href = "https://www.amazon.in" + href
+                    product_link = href
+                return {"price": price, "link": product_link, "title": title}
+    return None
+
+
+def _scrape_flipkart_search(query: str) -> dict | None:
+    """Scrape Flipkart search results page for the first matching product and price."""
+    url = f"https://www.flipkart.com/search?q={urllib.parse.quote_plus(query)}"
+    r = _get(url, timeout=15)
+    if not r:
+        return None
+    
+    # Try JSON-LD first
+    price_from_ld = extract_price_from_json_ld(r.text)
+    
+    soup = BeautifulSoup(r.text, "html.parser")
+    
+    accessory_words = [
+        "cover", "case", "glass", "protector", "guard", "cable", "charger",
+        "adapter", "strap", "pouch", "film", "skin", "sleeve", "tempered",
+        "holder", "stand", "mount", "ring", "grip", "sticker", "decal"
+    ]
+    query_lower = query.lower()
+    
+    # Flipkart uses various card structures - try multiple selectors
+    # Method 1: Find product cards by link+price pattern
+    product_links = soup.select("a[href*='/p/']")
+    if not product_links:
+        product_links = soup.select("a[href*='pid=']")
+    
+    for link_el in product_links[:15]:
+        href = link_el.get("href", "")
+        if not href:
+            continue
+        if not href.startswith("http"):
+            href = "https://www.flipkart.com" + href
+        
+        # Get the card container (parent of the link)
+        card = link_el
+        # Walk up to find the product card container
+        for _ in range(5):
+            parent = card.parent
+            if parent:
+                card = parent
+            else:
+                break
+        
+        card_text = card.get_text(" ", strip=True).lower()
+        
+        # Skip accessories
+        is_accessory = False
+        for kw in accessory_words:
+            if kw in card_text and kw not in query_lower:
+                is_accessory = True
+                break
+        if is_accessory:
+            continue
+        
+        # Look for price in the card container
+        price_el = (card.select_one("div.Nx9bqj") or
+                    card.select_one("div._30jeq3") or
+                    card.select_one("div._1_WHN1") or
+                    card.select_one("div[class*='price']") or
+                    card.select_one("span[class*='price']"))
+        
+        if price_el:
+            price = extract_price(price_el.get_text())
+            if price:
+                title_el = (card.select_one("div.KzDlHZ") or
+                            card.select_one("a.IRpwTa") or
+                            card.select_one("div._4rR01T") or
+                            card.select_one("a.s1Q9rs"))
+                title = title_el.get_text(strip=True) if title_el else ""
+                return {"price": price, "link": href, "title": title}
+        
+        # Try extracting price from card text
+        price = extract_price(card.get_text())
+        if price:
+            return {"price": price, "link": href, "title": ""}
+    
+    # Fallback: try any price on the page with JSON-LD
+    if price_from_ld:
+        return {"price": price_from_ld, "link": url, "title": ""}
+    
+    return None
+
+
+# Stores that have native search page scrapers (bypass DuckDuckGo)
+NATIVE_SEARCH_SCRAPERS = {
+    "Amazon India":  _scrape_amazon_search,
+    "Flipkart":      _scrape_flipkart_search,
+}
+
 DIRECT_SCRAPERS = {
     "Amazon India":     _scrape_amazon_direct,
     "Flipkart":         _scrape_flipkart_direct,
@@ -466,82 +620,238 @@ STORE_DOMAINS = {
     "dmart.in":           "DMart Online",
 }
 
+# Price sanity bounds per category — skip results outside these ranges
+PRICE_BOUNDS = {
+    "electronics_stores": (500, 10_000_000),    # Electronics: ₹500 – ₹1Cr
+    "grocery_stores":     (5, 50_000),           # Grocery: ₹5 – ₹50K
+}
 
-# ── Main price fetcher — parallel scraping ────────────────────────────────────
+# ── LangChain DuckDuckGo Search helpers ──────────────────────────────────────
+
+# Store domains for site-scoped targeted searches
+STORE_SITE_DOMAINS = {
+    "Amazon India": "amazon.in",
+    "Flipkart": "flipkart.com",
+    "Croma": "croma.com",
+    "Vijay Sales": "vijaysales.com",
+    "Reliance Digital": "reliancedigital.in",
+    "Tata Cliq": "tatacliq.com",
+    "Blinkit": "blinkit.com",
+    "Zepto": "zeptonow.com",
+    "BigBasket": "bigbasket.com",
+    "Swiggy Instamart": "swiggy.com",
+    "JioMart": "jiomart.com",
+    "DMart Online": "dmart.in",
+}
+
+# Accessory keywords used for both query exclusion and result filtering
+ACCESSORY_EXCLUDE_KEYWORDS = [
+    "cover", "case", "protector", "guard", "tempered", "glass",
+    "cable", "charger", "adapter", "strap", "pouch", "film",
+    "skin", "sleeve", "holder", "stand", "mount", "sticker",
+    "decal", "buds", "earbuds", "headphones", "tpu", "bumper",
+    "folio", "wallet case", "flip cover", "lens protector",
+    "camera protector", "back cover", "screen guard",
+]
+
+
+def _build_exclusion_string(query: str) -> str:
+    """Build negative keyword string, skipping terms already in the user's query."""
+    query_lower = query.lower()
+    return " ".join(f"-{kw}" for kw in ACCESSORY_EXCLUDE_KEYWORDS if kw not in query_lower)
+
+
+def _langchain_ddg_search(search_query: str, max_results: int = 10) -> list:
+    """Perform search using LangChain's DuckDuckGoSearchResults tool.
+    Returns a list of dicts with keys: snippet, title, link."""
+    try:
+        wrapper = DuckDuckGoSearchAPIWrapper(
+            max_results=max_results,
+            region="in-en",  # India region for relevant pricing
+        )
+        tool = DuckDuckGoSearchResults(
+            api_wrapper=wrapper,
+            output_format="list",
+        )
+        results = tool.invoke(search_query)
+        return results if isinstance(results, list) else []
+    except Exception:
+        return []
+
+
+def _is_accessory_result(text: str, query: str) -> bool:
+    """Check if a search result is an accessory/irrelevant product."""
+    text_lower = text.lower()
+    query_lower = query.lower()
+    return any(
+        kw in text_lower and kw not in query_lower
+        for kw in ACCESSORY_EXCLUDE_KEYWORDS
+    )
+
+
+def _search_store_targeted(query: str, store_name: str) -> dict | None:
+    """Search for a product on a specific store using site-scoped LangChain search.
+    Uses exact-quoted product name + negative keywords for maximum accuracy."""
+    domain = STORE_SITE_DOMAINS.get(store_name)
+    if not domain:
+        return None
+
+    exclusions = _build_exclusion_string(query)
+    search_query = f'"{query}" price site:{domain} {exclusions}'
+
+    results = _langchain_ddg_search(search_query, max_results=5)
+
+    for r in results:
+        title = r.get("title", "")
+        snippet = r.get("snippet", "")
+        link = r.get("link", "")
+
+        # Verify it's actually from the target domain
+        if domain not in link.lower():
+            continue
+
+        # Skip accessory results
+        combined = f"{title} {snippet}"
+        if _is_accessory_result(combined, query):
+            continue
+
+        price = extract_price(title) or extract_price(snippet)
+        return {"price": price, "link": link, "title": title}
+
+    return None
+
+
+# ── Main price fetcher — hybrid parallel scraping ─────────────────────────────
+def _price_in_bounds(price: float | None, store_category: str) -> bool:
+    """Check if a price falls within sane bounds for the product category."""
+    if price is None:
+        return True  # No price to check
+    lo, hi = PRICE_BOUNDS.get(store_category, (5, 10_000_000))
+    return lo <= price <= hi
+
+
 def fetch_prices(product: dict) -> list:
     """
-    Finds prices using DuckDuckGo search to retrieve direct product links
-    and then parses prices from the search snippets or by fetching product pages in parallel.
+    Hybrid approach:
+    1. For Amazon & Flipkart: scrape their native search pages directly (most accurate)
+    2. For other stores: use DuckDuckGo to find product links, then scrape
+    3. Apply price sanity bounds to filter out accessories/wrong products
     """
-    category_stores = (GROCERY_STORES if product.get("store_category") == "grocery_stores"
+    store_category = product.get("store_category", "electronics_stores")
+    category_stores = (GROCERY_STORES if store_category == "grocery_stores"
                        else ELECTRONICS_STORES)
     query = product.get("search_query", product.get("name", ""))
     
-    # We do a general DuckDuckGo search for: buy <query> online india
-    search_q = f"buy {query} online india"
+    bar = st.progress(0, text="🔍 Searching for best prices…")
     
-    bar = st.progress(0, text="🔍 Searching DuckDuckGo for product links…")
-    
-    raw_results = []
-    try:
-        with DDGS() as ddgs:
-            raw_results = list(ddgs.text(search_q, max_results=30))
-    except Exception as e:
-        st.warning(f"⚠️ Search engine warning: {e}")
-        
-    bar.progress(30, text="🔗 Mapping links to store domains…")
-    
-    # Filter and group by store name
     found_stores = {}
+    
+    # ── PHASE 1: Native search scrapers (Amazon, Flipkart) — most reliable ──
+    native_stores = [s for s in category_stores if s in NATIVE_SEARCH_SCRAPERS]
+    
+    def scrape_native(store_name: str) -> tuple[str, dict | None]:
+        fn = NATIVE_SEARCH_SCRAPERS[store_name]
+        try:
+            return store_name, fn(query)
+        except Exception:
+            return store_name, None
+    
+    if native_stores:
+        bar.progress(5, text=f"🛒 Searching {', '.join(native_stores)} directly…")
+        with ThreadPoolExecutor(max_workers=len(native_stores)) as ex:
+            futures = {ex.submit(scrape_native, s): s for s in native_stores}
+            for future in as_completed(futures):
+                store_name, result = future.result()
+                if result and result.get("price"):
+                    price = result["price"]
+                    if _price_in_bounds(price, store_category):
+                        found_stores[store_name] = {
+                            "site": store_name,
+                            "link": result.get("link", STORE_SEARCH_URLS[store_name](query)),
+                            "price": price,
+                        }
+    
+    bar.progress(25, text="🔍 Searching via LangChain DuckDuckGo…")
+    
+    # ── PHASE 2a: LangChain broad search with smart query ───────────────────
+    ddg_target_stores = [s for s in category_stores if s not in found_stores]
+    
+    # Build a smarter query: quoted product name + negative keywords to exclude accessories
+    exclusions = _build_exclusion_string(query)
+    search_q = f'"{query}" price buy online India {exclusions}'
+    raw_results = _langchain_ddg_search(search_q, max_results=25)
+    
+    if not raw_results:
+        st.warning("⚠️ Broad search returned no results, trying targeted searches…")
+        
+    bar.progress(40, text="🔗 Mapping results to stores…")
+    
+    user_query_lower = query.lower()
+    
     for r in raw_results:
-        href = r.get("href", "")
+        href = r.get("link", "")
         title = r.get("title", "")
-        body = r.get("body", "")
+        snippet = r.get("snippet", "")
         
         parsed_url = urllib.parse.urlparse(href)
         domain = parsed_url.netloc.replace("www.", "").lower()
         
-        # Check for accessory mismatch (e.g. cover/case matched when searching for phone)
-        is_accessory_result = False
-        user_query_lower = query.lower()
-        title_lower = title.lower()
-        href_lower = href.lower()
-        
-        accessory_keywords = [
-            "cover", "case", "glass", "protector", "guard", "cable", "charger",
-            "adapter", "strap", "pouch", "film", "skin", "sleeve", "accessory",
-            "accessories", "tempered", "buds", "earbuds", "headphones", "headphone"
-        ]
-        for word in accessory_keywords:
-            if word in title_lower or word in href_lower:
-                if word not in user_query_lower:
-                    is_accessory_result = True
-                    break
-                    
-        if is_accessory_result:
+        # Skip accessory results using centralized filter
+        combined_text = f"{title} {href} {snippet}"
+        if _is_accessory_result(combined_text, query):
             continue
             
         matched_store = None
         for d_key, store_name in STORE_DOMAINS.items():
             if d_key in domain:
-                # Make sure the matched store is relevant to the active category
-                if store_name in category_stores:
+                if store_name in ddg_target_stores:
                     matched_store = store_name
                     break
         
-        if matched_store:
+        if matched_store and matched_store not in found_stores:
             # Try to parse price from snippet
-            price = extract_price(title) or extract_price(body)
+            price = extract_price(title) or extract_price(snippet)
             
-            # Keep the first result for this store, or update if we found a price
-            if matched_store not in found_stores or (price and not found_stores[matched_store]["price"]):
-                found_stores[matched_store] = {
-                    "site": matched_store,
-                    "link": href,
-                    "price": price,
-                }
+            # Apply price sanity check on snippet prices
+            if price and not _price_in_bounds(price, store_category):
+                price = None  # Reject out-of-bounds prices (likely accessories)
+            
+            found_stores[matched_store] = {
+                "site": matched_store,
+                "link": href,
+                "price": price,
+            }
+    
+    # ── PHASE 2b: Targeted per-store site-scoped search for missing stores ──
+    still_missing = [s for s in ddg_target_stores if s not in found_stores]
+    
+    if still_missing:
+        bar.progress(45, text=f"🎯 Targeted search for {len(still_missing)} remaining stores…")
+        
+        def _targeted_search(store_name: str) -> tuple:
+            return store_name, _search_store_targeted(query, store_name)
+        
+        with ThreadPoolExecutor(max_workers=min(3, len(still_missing))) as ex:
+            futures = {ex.submit(_targeted_search, s): s for s in still_missing}
+            done_targeted = 0
+            for future in as_completed(futures):
+                store_name, result = future.result()
+                done_targeted += 1
+                bar.progress(
+                    45 + int(done_targeted / len(still_missing) * 10),
+                    text=f"🎯 {done_targeted}/{len(still_missing)} targeted searches done…"
+                )
+                if result:
+                    price = result.get("price")
+                    if price and not _price_in_bounds(price, store_category):
+                        price = None
+                    found_stores[store_name] = {
+                        "site": store_name,
+                        "link": result.get("link", STORE_SEARCH_URLS[store_name](query)),
+                        "price": price,
+                    }
                 
-    # Now, for any store found where price is None, we try to fetch and scrape the direct product page
+    # ── PHASE 3: Scrape direct pages for stores with no price yet ───────────
     stores_to_scrape = [item for item in found_stores.values() if item["price"] is None]
     
     done = 0
@@ -552,18 +862,22 @@ def fetch_prices(product: dict) -> list:
         url = item["link"]
         fn = DIRECT_SCRAPERS.get(store_name, _scrape_generic_direct)
         try:
-            return store_name, fn(url)
+            price = fn(url)
+            # Apply sanity bounds to scraped prices too
+            if price and _price_in_bounds(price, store_category):
+                return store_name, price
+            return store_name, None
         except Exception:
             return store_name, None
 
     if total > 0:
-        bar.progress(40, text=f"🔍 Fetching live prices from {total} stores…")
+        bar.progress(55, text=f"🔍 Fetching live prices from {total} stores…")
         with ThreadPoolExecutor(max_workers=min(6, total)) as ex:
             futures = {ex.submit(scrape_store_page, item): item for item in stores_to_scrape}
             for future in as_completed(futures):
                 store_name, price = future.result()
                 done += 1
-                bar.progress(40 + int(done / total * 55),
+                bar.progress(55 + int(done / total * 40),
                              text=f"✅ {done}/{total} stores checked…")
                 if price:
                     found_stores[store_name]["price"] = price
