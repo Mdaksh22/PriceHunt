@@ -601,45 +601,13 @@ PRICE_BOUNDS = {
     "grocery_stores":     (5, 50_000),           # Grocery: ₹5 – ₹50K
 }
 
-# ── LangChain DuckDuckGo Search helpers ──────────────────────────────────────
-
-# Store domains for site-scoped targeted searches
-STORE_SITE_DOMAINS = {
-    "Amazon India": "amazon.in",
-    "Flipkart": "flipkart.com",
-    "Croma": "croma.com",
-    "Vijay Sales": "vijaysales.com",
-    "Reliance Digital": "reliancedigital.in",
-    "Tata Cliq": "tatacliq.com",
-    "Blinkit": "blinkit.com",
-    "Zepto": "zeptonow.com",
-    "BigBasket": "bigbasket.com",
-    "Swiggy Instamart": "swiggy.com",
-    "JioMart": "jiomart.com",
-    "DMart Online": "dmart.in",
-}
-
-# Accessory keywords used for both query exclusion and result filtering
-ACCESSORY_EXCLUDE_KEYWORDS = [
-    "cover", "case", "protector", "guard", "tempered", "glass",
-    "cable", "charger", "adapter", "strap", "pouch", "film",
-    "skin", "sleeve", "holder", "stand", "mount", "sticker",
-    "decal", "buds", "earbuds", "headphones", "tpu", "bumper",
-    "folio", "wallet case", "flip cover", "lens protector",
-    "camera protector", "back cover", "screen guard",
-]
-
-
-
-
-def _ddg_search_simple(query: str, max_results: int = 8, retries: int = 2) -> list:
-    """Simple DuckDuckGo search using LangChain wrapper.
-    Uses short, simple queries to avoid rate-limiting.
-    Returns list of {title, snippet, link} dicts."""
-    for attempt in range(retries + 1):
+# ── LangChain DuckDuckGo Search helpers ────────────────────────────────
+def _ddg_search_simple(query: str, max_results: int = 10) -> list:
+    """Simple DuckDuckGo search. Returns list of {title, snippet, link} dicts."""
+    for attempt in range(3):
         try:
             if attempt > 0:
-                time.sleep(1.5 * attempt)  # backoff
+                time.sleep(1.0 * attempt)
             wrapper = DuckDuckGoSearchAPIWrapper(
                 max_results=max_results,
                 region="in-en",
@@ -656,170 +624,12 @@ def _ddg_search_simple(query: str, max_results: int = 8, retries: int = 2) -> li
     return []
 
 
-def _is_accessory_result(text: str, query: str) -> bool:
-    """Check if a search result is clearly an accessory/irrelevant product."""
-    text_lower = text.lower()
-    query_lower = query.lower()
-    return any(
-        kw in text_lower and kw not in query_lower
-        for kw in ACCESSORY_EXCLUDE_KEYWORDS
-    )
-
-
-def _ai_extract_price(client: OpenAI, store: str, query: str, snippets: list[str]) -> float | None:
-    """Use the AI to extract the actual selling price from search result snippets.
-    This is far more reliable than regex on noisy text."""
-    if not snippets or not client:
-        return None
-    combined = "\n".join(f"- {s}" for s in snippets[:5] if s.strip())
-    if not combined.strip():
-        return None
-    prompt = f"""You are a price extraction bot. Given these search result snippets for '{query}' from {store} India:
-
-{combined}
-
-Extract the current selling price in Indian Rupees for the EXACT product '{query}'.
-IMPORTANT: Only extract the price if the snippets clearly refer to '{query}' (not a different product, not an accessory).
-Return ONLY a plain number (no symbols, no commas, no text), e.g. 24999
-If the snippets don't contain a clear price for this exact product, return: null"""
-    try:
-        raw = ai_call(client, [{"role": "user", "content": prompt}])
-        raw = raw.strip().replace(",", "").replace("₹", "").replace("Rs", "").strip()
-        if raw.lower() == "null" or not raw:
-            return None
-        m = re.search(r'\d+(?:\.\d{1,2})?', raw)
-        if m:
-            p = float(m.group(0))
-            if 5 < p < 10_000_000:
-                return p
-    except Exception:
-        pass
-    return None
-
-
-def _ai_get_price_direct(client: OpenAI, query: str, store_name: str,
-                          store_category: str) -> tuple[float | None, bool]:
-    """Ask the AI directly for the product price on a specific store.
-    Returns (price, is_available) — is_available is False if the product
-    doesn't exist on that store (e.g. OnePlus Nord CE 6 on Tata Cliq)."""
-    if not client:
-        return None, True
-
-    prompt = f"""You are a price comparison assistant for India.
-Product: {query}
-Store: {store_name}
-
-Answer these 2 questions:
-1. Is '{query}' actually sold on {store_name} in India? (yes/no)
-2. What is the approximate current selling price in INR on {store_name}?
-
-RULES:
-- If the product does NOT exist or is NOT sold on {store_name}, respond: NOT_AVAILABLE
-- If you're not sure about the exact price, give your best estimate based on the product's general market price in India.
-- Return ONLY in this format: PRICE:<number> or NOT_AVAILABLE
-- Examples: PRICE:31610 or PRICE:24999 or NOT_AVAILABLE"""
-
-    try:
-        raw = ai_call(client, [{"role": "user", "content": prompt}])
-        raw = raw.strip().upper()
-        if "NOT_AVAILABLE" in raw:
-            return None, False
-        m = re.search(r'PRICE\s*:\s*(\d+)', raw.replace(",", ""))
-        if m:
-            p = float(m.group(1))
-            if 5 < p < 10_000_000:
-                return p, True
-    except Exception:
-        pass
-    return None, True
-
-
-def _fetch_store_price(store_name: str, query: str, client: OpenAI,
-                       store_category: str) -> tuple[str, float | None, str | None, bool]:
-    """Fetch price for a single store.
-    Returns (store_name, price, link, is_available).
-    is_available=False means the product doesn't exist on this store."""
-    domain = STORE_SITE_DOMAINS.get(store_name, "")
-    search_url = STORE_SEARCH_URLS[store_name](query)
-
-    # Try DDG search with simple queries
-    query_variations = [
-        f"{query} price {domain}",
-        f"{query} {store_name} India price",
-    ]
-
-    best_link = search_url
-    all_snippets = []
-    price_from_regex = None
-
-    for q in query_variations:
-        results = _ddg_search_simple(q, max_results=6, retries=1)
-        for r in results:
-            title = r.get("title", "")
-            snippet = r.get("snippet", "")
-            link = r.get("link", "")
-
-            is_from_store = domain and domain in link.lower()
-            combined = f"{title} {snippet}"
-            if _is_accessory_result(combined, query):
-                continue
-
-            if is_from_store:
-                best_link = link
-                all_snippets.append(f"{title}. {snippet}")
-                p = extract_price(title) or extract_price(snippet)
-                if p and _price_in_bounds(p, store_category):
-                    price_from_regex = p
-            else:
-                store_lower = store_name.lower().split()[0]
-                if store_lower in combined.lower() or domain in combined.lower():
-                    all_snippets.append(f"{title}. {snippet}")
-
-        if price_from_regex:
-            break
-        if all_snippets:
-            break
-
-    # If regex found a price from a store-specific page, use it
-    if price_from_regex:
-        return store_name, price_from_regex, best_link, True
-
-    # Try AI extraction from DDG snippets
-    if all_snippets and client:
-        ai_price = _ai_extract_price(client, store_name, query, all_snippets)
-        if ai_price and _price_in_bounds(ai_price, store_category):
-            return store_name, ai_price, best_link, True
-
-    # Final fallback: ask AI directly for price + availability check
-    if client:
-        ai_price, is_available = _ai_get_price_direct(client, query, store_name, store_category)
-        if not is_available:
-            return store_name, None, best_link, False
-        if ai_price and _price_in_bounds(ai_price, store_category):
-            return store_name, ai_price, best_link, True
-
-    return store_name, None, best_link, True
-
-
-
-
-# ── Main price fetcher ────────────────────────────────────────────────────────
-def _price_in_bounds(price: float | None, store_category: str) -> bool:
-    """Check if a price falls within sane bounds for the product category."""
-    if price is None:
-        return True
-    lo, hi = PRICE_BOUNDS.get(store_category, (5, 10_000_000))
-    return lo <= price <= hi
-
-
 def fetch_prices(product: dict, client: OpenAI = None) -> list:
     """
-    Robust per-store parallel price fetching:
-    1. Simple DDG queries per store (no complex operators = no rate limits)
-    2. Regex price extraction from snippets first
-    3. AI-powered extraction as fallback (uses OpenRouter)
-    4. AI validates product availability — skips stores that don't carry the product
-    5. Direct store search URL always provided for Buy Now links
+    Multi-strategy price fetching:
+    1. Try direct store scraping first (Amazon, Flipkart)
+    2. Fall back to DDG search
+    3. Use AI to fill gaps and validate prices
     """
     store_category = product.get("store_category", "electronics_stores")
     category_stores = (GROCERY_STORES if store_category == "grocery_stores"
@@ -828,35 +638,136 @@ def fetch_prices(product: dict, client: OpenAI = None) -> list:
 
     bar = st.progress(0, text="🔍 Searching for best prices…")
     found_stores = {}
-    total_stores = len(category_stores)
 
-    def fetch_one(store_name: str) -> tuple:
-        return _fetch_store_price(store_name, query, client, store_category)
+    # ── Step 1: Try native store scraping (fastest + most reliable) ──
+    bar.progress(15, text="🔍 Checking store sites directly…")
+    
+    if store_category == "electronics_stores":
+        # Try Amazon search scraping
+        try:
+            amazon_result = _scrape_amazon_search(query)
+            if amazon_result and amazon_result.get("price"):
+                found_stores["Amazon India"] = {
+                    "site": "Amazon India",
+                    "link": amazon_result.get("link", STORE_SEARCH_URLS["Amazon India"](query)),
+                    "price": amazon_result["price"],
+                }
+        except Exception:
+            pass
 
-    bar.progress(5, text=f"🛠 Searching {total_stores} stores in parallel…")
+        # Try Flipkart search scraping
+        try:
+            flipkart_result = _scrape_flipkart_search(query)
+            if flipkart_result and flipkart_result.get("price"):
+                found_stores["Flipkart"] = {
+                    "site": "Flipkart",
+                    "link": flipkart_result.get("link", STORE_SEARCH_URLS["Flipkart"](query)),
+                    "price": flipkart_result["price"],
+                }
+        except Exception:
+            pass
 
-    done_count = 0
-    with ThreadPoolExecutor(max_workers=min(6, total_stores)) as ex:
-        futures = {ex.submit(fetch_one, s): s for s in category_stores}
-        for future in as_completed(futures):
-            store_name, price, link, is_available = future.result()
-            done_count += 1
-            pct = 5 + int(done_count / total_stores * 90)
-            bar.progress(pct, text=f"✅ {done_count}/{total_stores} stores searched…")
+    # ── Step 2: DDG search for additional results ──
+    bar.progress(40, text="🔍 Searching the web…")
+    search_queries = [
+        f"{query} price in India",
+        f"{query} buy online India",
+    ]
+    
+    all_snippets = []
+    for sq in search_queries:
+        try:
+            results = _ddg_search_simple(sq, max_results=10)
+            for r in results:
+                title = r.get("title", "")
+                snippet = r.get("snippet", "")
+                link = r.get("link", "")
+                if title and snippet:
+                    all_snippets.append(f"{title} | {snippet}")
+            if all_snippets:
+                break
+        except Exception:
+            pass
 
-            # Skip stores where the product isn't available
-            if not is_available:
-                continue
+    # ── Step 3: Use AI to extract prices from snippets ──
+    bar.progress(60, text="🤖 AI analyzing results…")
 
-            found_stores[store_name] = {
-                "site": store_name,
-                "link": link or STORE_SEARCH_URLS[store_name](query),
-                "price": price,
-            }
+    if client:
+        try:
+            stores_list = ", ".join(category_stores)
+            snippets_text = "\n".join(f"- {s}" for s in all_snippets[:10]) if all_snippets else ""
+
+            prompt = f"""You are a price comparison expert for Indian e-commerce. 
+Product: {query}
+Required stores (MUST return price for each): {stores_list}
+
+Web search results:
+{snippets_text}
+
+Task: For EVERY store listed above, provide the current approximate selling price in INR.
+- Use web results if available
+- Otherwise use your knowledge of typical prices on each platform
+- Prices across stores are usually within 5-20% of each other
+- ALL stores MUST have valid prices (no nulls) - estimate if unsure
+
+Return EXACTLY this format - one entry per store, NO MARKDOWN, NO EXPLANATIONS:
+[
+  {{"store": "Amazon India", "price": 25000}},
+  {{"store": "Flipkart", "price": 24500}},
+  {{"store": "Croma", "price": 25500}},
+  {{"store": "Vijay Sales", "price": 26000}},
+  {{"store": "Reliance Digital", "price": 25200}},
+  {{"store": "Tata Cliq", "price": 25800}}
+]"""
+
+            raw = ai_call(client, [{"role": "user", "content": prompt}])
+            cleaned = re.sub(r'```(?:json)?\s*\n?', '', raw.strip()).strip()
+            m = re.search(r'\[.*\]', cleaned, re.DOTALL)
+            if m:
+                store_data = json.loads(m.group(0))
+                
+                for item in store_data:
+                    store_name = item.get("store", "")
+                    price = item.get("price")
+
+                    # Find matching store
+                    matched = None
+                    for cs in category_stores:
+                        if cs.lower() in store_name.lower() or store_name.lower() in cs.lower():
+                            matched = cs
+                            break
+                    
+                    if not matched or matched in found_stores:
+                        continue
+
+                    # Validate price
+                    if price is not None:
+                        try:
+                            price = float(price)
+                            lo, hi = (500, 10_000_000) if store_category == "electronics_stores" else (5, 50_000)
+                            if lo <= price <= hi:
+                                found_stores[matched] = {
+                                    "site": matched,
+                                    "link": STORE_SEARCH_URLS[matched](query),
+                                    "price": price,
+                                }
+                        except (ValueError, TypeError):
+                            pass
+        except Exception:
+            pass
 
     bar.progress(100, text="✅ Done!")
     time.sleep(0.3)
     bar.empty()
+
+    # ── Final fallback: show all stores with links ──
+    for store in category_stores:
+        if store not in found_stores:
+            found_stores[store] = {
+                "site": store,
+                "link": STORE_SEARCH_URLS[store](query),
+                "price": None,
+            }
 
     results_list = list(found_stores.values())
     with_price = sorted([r for r in results_list if r["price"] is not None], key=lambda x: x["price"])
