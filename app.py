@@ -204,6 +204,25 @@ STORE_SEARCH_URLS = {
     "Tata Cliq":        lambda q: f"https://www.tatacliq.com/search/?searchCategory=all&text={urllib.parse.quote_plus(q)}",
 }
 
+# ── Location-based store availability ─────────────────────────────────────────
+# Maps major Indian cities/regions to available stores
+STORE_AVAILABILITY = {
+    "metro": {  # Tier 1 cities: Delhi, Mumbai, Bangalore, Hyderabad, Chennai, Pune, Kolkata
+        "grocery": ["Blinkit", "Zepto", "BigBasket", "Swiggy Instamart", "JioMart", "DMart Online"],
+        "electronics": ["Amazon India", "Flipkart", "Croma", "Vijay Sales", "Reliance Digital", "Tata Cliq"],
+    },
+    "tier2": {  # Tier 2 cities
+        "grocery": ["BigBasket", "JioMart", "DMart Online", "Blinkit", "Zepto"],
+        "electronics": ["Amazon India", "Flipkart", "Croma", "Vijay Sales", "Reliance Digital"],
+    },
+    "tier3": {  # Tier 3 cities and smaller towns
+        "grocery": ["BigBasket", "JioMart", "DMart Online"],
+        "electronics": ["Amazon India", "Flipkart", "Reliance Digital"],
+    },
+}
+
+METRO_CITIES = ["Delhi", "Mumbai", "Bangalore", "Hyderabad", "Chennai", "Pune", "Kolkata", "Ahmedabad", "Jaipur"]
+
 # ── HTTP headers — mimic a real browser ─────────────────────────────────────
 SCRAPE_HEADERS = {
     "User-Agent": (
@@ -216,6 +235,22 @@ SCRAPE_HEADERS = {
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
 }
+
+# ── Get stores available in user's location ─────────────────────────────────
+def get_available_stores(city: str, category: str) -> list:
+    """Return list of stores available in the given city for the category."""
+    city_lower = city.lower().strip()
+    
+    # Determine city tier
+    if any(metro in city_lower for metro in [c.lower() for c in METRO_CITIES]):
+        tier = "metro"
+    elif len(city_lower) > 3:  # Assume tier2 for most cities
+        tier = "tier2"
+    else:
+        tier = "tier3"
+    
+    store_type = "grocery" if category == "grocery_stores" else "electronics"
+    return STORE_AVAILABILITY.get(tier, {}).get(store_type, [])
 
 
 def make_client(api_key: str) -> OpenAI:
@@ -638,16 +673,27 @@ def _ddg_search_simple(query: str, max_results: int = 10) -> list:
     return []
 
 
-def fetch_prices(product: dict, client: OpenAI = None) -> list:
+def fetch_prices(product: dict, client: OpenAI = None, user_city: str = None) -> list:
     """
     Multi-strategy price fetching:
     1. Try direct store scraping first (Amazon, Flipkart)
     2. Fall back to DDG search
     3. Use AI to fill gaps and validate prices
+    4. Filter results based on location availability
     """
     store_category = product.get("store_category", "electronics_stores")
-    category_stores = (GROCERY_STORES if store_category == "grocery_stores"
-                       else ELECTRONICS_STORES)
+    
+    # Get all stores for this category
+    all_category_stores = (GROCERY_STORES if store_category == "grocery_stores"
+                           else ELECTRONICS_STORES)
+    
+    # Filter by user's location availability
+    if user_city:
+        available_stores = get_available_stores(user_city, store_category)
+        category_stores = [s for s in all_category_stores if s in available_stores]
+    else:
+        category_stores = all_category_stores
+    
     query = product.get("search_query", product.get("name", ""))
 
     bar = st.progress(0, text="🔍 Searching for best prices…")
@@ -895,12 +941,24 @@ def main():
             st.success("✅ OpenRouter key loaded")
 
         st.markdown("---")
+        st.markdown("### 📍 Your Location")
+        user_city = st.text_input(
+            "City/Location",
+            placeholder="e.g., Mumbai, Delhi, Bangalore",
+            help="Helps show prices from stores available in your area"
+        )
+        if user_city:
+            available_stores_grocery = get_available_stores(user_city, "grocery_stores")
+            available_stores_elec = get_available_stores(user_city, "electronics_stores")
+            st.caption(f"✓ {len(available_stores_grocery)} grocery + {len(available_stores_elec)} electronics stores")
+        
+        st.markdown("---")
         st.markdown("**How it works**")
         st.markdown(
             "- 🤖 AI identifies your product\n"
+            "- 📍 Shows stores in your city\n"
             "- 🔍 Searches each store directly\n"
             "- 🛒 Shows cheapest prices\n"
-            "- ✅ No API key for price search\n"
             "- 🔗 Buy Now → goes direct to store"
         )
 
@@ -1017,11 +1075,19 @@ def main():
     # Show product info
     cat_emoji = {"grocery": "🛒", "electronics": "📱", "fashion": "👗",
                  "home": "🏠", "beauty": "💄"}.get(product.get("category", ""), "📦")
-    stores_label = (
-        "Blinkit, Zepto, BigBasket, Swiggy Instamart, JioMart, DMart"
-        if product.get("store_category") == "grocery_stores"
-        else "Amazon, Flipkart, Croma, Vijay Sales, Reliance Digital, Tata Cliq"
-    )
+    
+    # Get available stores based on location
+    if user_city:
+        available_stores = get_available_stores(user_city, product.get("store_category", "electronics_stores"))
+        stores_label = ", ".join(available_stores) if available_stores else "No stores available in your area"
+        location_tag = f" (in {user_city})"
+    else:
+        stores_label = (
+            "Blinkit, Zepto, BigBasket, Swiggy Instamart, JioMart, DMart"
+            if product.get("store_category") == "grocery_stores"
+            else "Amazon, Flipkart, Croma, Vijay Sales, Reliance Digital, Tata Cliq"
+        )
+        location_tag = ""
 
     st.markdown(f"""
 <div class="ph-product">
@@ -1030,12 +1096,12 @@ def main():
     Brand: <strong>{product.get('brand') or '—'}</strong> &nbsp;·&nbsp;
     Variant: <strong>{product.get('variant') or '—'}</strong>
   </div>
-  <div style="font-size:0.8rem;margin-top:0.3rem;color:#92400e;">🏪 Searching: {stores_label}</div>
+  <div style="font-size:0.8rem;margin-top:0.3rem;color:#92400e;">🏪 Searching{location_tag}: {stores_label}</div>
 </div>""", unsafe_allow_html=True)
 
     # Fetch & show prices
     st.markdown('<div class="ph-section">Price Comparison — Cheapest First</div>', unsafe_allow_html=True)
-    results = fetch_prices(product, client=client)
+    results = fetch_prices(product, client=client, user_city=user_city)
 
     if not results:
         query = product.get("search_query", product.get("name", ""))
