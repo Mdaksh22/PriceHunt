@@ -469,6 +469,7 @@ def _scrape_amazon_search(query: str) -> dict | None:
         "holder", "stand", "mount", "ring", "grip", "sticker", "decal"
     ]
     query_lower = query.lower()
+    query_keywords = [w for w in query_lower.split() if len(w) > 3]  # Main keywords
     
     for card in cards[:10]:  # Check top 10 results
         # Skip sponsored/ad results
@@ -482,6 +483,12 @@ def _scrape_amazon_search(query: str) -> dict | None:
         title_el = card.select_one("h2 a span") or card.select_one("h2 span") or card.select_one(".a-text-normal")
         title = title_el.get_text(strip=True) if title_el else ""
         title_lower = title.lower()
+        
+        # Verify title contains main keywords from query (avoid wrong products)
+        if query_keywords:
+            matches_query = sum(1 for kw in query_keywords if kw in title_lower)
+            if matches_query < len(query_keywords) // 2:  # At least half of keywords must match
+                continue
         
         # Skip accessories
         is_accessory = False
@@ -529,6 +536,7 @@ def _scrape_flipkart_search(query: str) -> dict | None:
         "holder", "stand", "mount", "ring", "grip", "sticker", "decal"
     ]
     query_lower = query.lower()
+    query_keywords = [w for w in query_lower.split() if len(w) > 3]  # Main keywords
     
     # Flipkart uses various card structures - try multiple selectors
     # Method 1: Find product cards by link+price pattern
@@ -554,6 +562,12 @@ def _scrape_flipkart_search(query: str) -> dict | None:
                 break
         
         card_text = card.get_text(" ", strip=True).lower()
+        
+        # Verify this is the right product (check keywords match)
+        if query_keywords:
+            matches_query = sum(1 for kw in query_keywords if kw in card_text)
+            if matches_query < len(query_keywords) // 2:  # At least half of keywords
+                continue
         
         # Skip accessories
         is_accessory = False
@@ -669,15 +683,19 @@ def fetch_prices(product: dict, client: OpenAI = None) -> list:
 
     # ── Step 2: DDG search for additional results ──
     bar.progress(40, text="🔍 Searching the web…")
+    
+    # Search for the exact product on each store site
     search_queries = [
-        f"{query} price in India",
-        f"{query} buy online India",
+        f"site:amazon.in {query}",
+        f"site:flipkart.com {query}",
+        f"{query} online buy",
+        f"{query} official price",
     ]
     
     all_snippets = []
     for sq in search_queries:
         try:
-            results = _ddg_search_simple(sq, max_results=10)
+            results = _ddg_search_simple(sq, max_results=8)
             for r in results:
                 title = r.get("title", "")
                 snippet = r.get("snippet", "")
@@ -697,27 +715,32 @@ def fetch_prices(product: dict, client: OpenAI = None) -> list:
             stores_list = ", ".join(category_stores)
             snippets_text = "\n".join(f"- {s}" for s in all_snippets[:10]) if all_snippets else ""
 
-            prompt = f"""You are a price comparison expert for Indian e-commerce. 
-Product: {query}
-Required stores (MUST return price for each): {stores_list}
+            prompt = f"""You are a STRICT price comparison expert. Your JOB is accuracy ONLY.
 
-Web search results:
+REQUIRED PRODUCT: "{query}"
+STORES TO QUERY: {stores_list}
+
+Web results (may contain WRONG products - YOUR JOB to filter):
 {snippets_text}
 
-Task: For EVERY store listed above, provide the current approximate selling price in INR.
-- Use web results if available
-- Otherwise use your knowledge of typical prices on each platform
-- Prices across stores are usually within 5-20% of each other
-- ALL stores MUST have valid prices (no nulls) - estimate if unsure
+STRICT RULES (MANDATORY):
+1. ONLY return price for the EXACT product "{query}"
+2. REJECT any accessories/covers/cases/chargers/cables - they are NOT the product
+3. REJECT any completely different products (e.g., if searching OnePlus Nord CE 5, REJECT Redmi phones)
+4. REJECT any bundle offers or bundled prices - return ONLY the product price
+5. Use web results if available, but MUST cross-check accuracy with your knowledge
+6. Prices must be realistic for this category - too high/low = flag as unreliable
+7. If unsure if it's the right product, LEAVE price NULL
+8. ALL prices must be for the EXACT variant/model (if variant specified)
 
-Return EXACTLY this format - one entry per store, NO MARKDOWN, NO EXPLANATIONS:
+Return ONLY valid JSON, NO MARKDOWN, NO EXPLANATIONS:
 [
   {{"store": "Amazon India", "price": 25000}},
   {{"store": "Flipkart", "price": 24500}},
   {{"store": "Croma", "price": 25500}},
   {{"store": "Vijay Sales", "price": 26000}},
   {{"store": "Reliance Digital", "price": 25200}},
-  {{"store": "Tata Cliq", "price": 25800}}
+  {{"store": "Tata Cliq", "price": null}}
 ]"""
 
             raw = ai_call(client, [{"role": "user", "content": prompt}])
@@ -745,6 +768,8 @@ Return EXACTLY this format - one entry per store, NO MARKDOWN, NO EXPLANATIONS:
                         try:
                             price = float(price)
                             lo, hi = (500, 10_000_000) if store_category == "electronics_stores" else (5, 50_000)
+                            
+                            # Check if price is within reasonable bounds
                             if lo <= price <= hi:
                                 found_stores[matched] = {
                                     "site": matched,
