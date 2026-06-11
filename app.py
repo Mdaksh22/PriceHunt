@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 from openai import OpenAI
 import base64
 import json
@@ -171,16 +172,16 @@ div[role="radiogroup"] label { color: #44403c !important; }
 }
 [data-testid="stSidebar"] { background: #fdf8f2 !important; }
 
-.ph-location-bar {
-    background: #ffffff; border: 1.5px solid #e8ddd0; border-radius: 12px;
-    padding: 0.6rem 1rem; margin-bottom: 1.2rem;
-    display: flex; align-items: center; gap: 0.5rem;
-    box-shadow: 0 1px 6px rgba(0,0,0,0.04);
+.ph-loc-bar {
+    background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+    border: 1.5px solid #fcd34d; border-radius: 12px;
+    padding: 0.7rem 1.2rem; margin-bottom: 1rem;
+    display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
 }
-.ph-location-icon { font-size: 1.2rem; }
-.ph-location-text { font-size: 0.85rem; color: #78716c; }
-.ph-location-city { font-weight: 700; color: #1c1917; }
-.ph-location-stores { font-size: 0.75rem; color: #92400e; margin-top: 2px; }
+.ph-loc-icon { font-size: 1.3rem; }
+.ph-loc-city { font-weight: 700; color: #1c1917; font-size: 0.95rem; }
+.ph-loc-meta { font-size: 0.78rem; color: #78716c; }
+.ph-loc-stores { font-size: 0.75rem; color: #92400e; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -203,7 +204,7 @@ TEXT_MODELS = [
 GROCERY_STORES = ["Blinkit", "Zepto", "BigBasket", "Swiggy Instamart", "JioMart", "DMart Online"]
 ELECTRONICS_STORES = ["Amazon India", "Flipkart", "Croma", "Vijay Sales", "Reliance Digital", "Tata Cliq"]
 
-# Store domain names for site-specific DDG searches
+# Store domain names for DDG searches
 STORE_DOMAINS = {
     "Blinkit": "blinkit.com",
     "Zepto": "zeptonow.com",
@@ -236,17 +237,13 @@ STORE_SEARCH_URLS = {
 }
 
 # ── Comprehensive location-based store availability ───────────────────────────
-# Expanded city database covering 50+ Indian cities across tiers
-
 CITY_TIERS = {
-    # Tier 1 — Metro cities: all services available
     "metro": [
         "delhi", "new delhi", "mumbai", "bangalore", "bengaluru", "hyderabad",
         "chennai", "pune", "kolkata", "ahmedabad", "gurgaon", "gurugram",
         "noida", "greater noida", "ghaziabad", "faridabad", "navi mumbai",
         "thane",
     ],
-    # Tier 1.5 — Large cities with most services
     "tier1_5": [
         "jaipur", "lucknow", "chandigarh", "kochi", "cochin", "indore",
         "bhopal", "nagpur", "visakhapatnam", "vizag", "coimbatore",
@@ -255,7 +252,6 @@ CITY_TIERS = {
         "varanasi", "bhubaneswar", "dehradun", "mysore", "mysuru",
         "mangalore", "mangaluru", "goa", "panaji", "panjim",
     ],
-    # Tier 2 — Medium cities with partial coverage
     "tier2": [
         "ranchi", "raipur", "allahabad", "prayagraj", "amritsar", "jodhpur",
         "gwalior", "jalandhar", "aurangabad", "jammu", "udaipur", "siliguri",
@@ -301,18 +297,44 @@ SCRAPE_HEADERS = {
 }
 
 
+# ── Geolocation: reverse geocode lat/lng to city name ────────────────────────
+def reverse_geocode(lat: float, lng: float) -> str:
+    """Use OpenStreetMap Nominatim to convert coordinates to city name."""
+    try:
+        url = (
+            f"https://nominatim.openstreetmap.org/reverse"
+            f"?lat={lat}&lon={lng}&format=json&addressdetails=1&zoom=12"
+        )
+        headers = {"User-Agent": "PriceHunt/1.0 (price-comparison-app)"}
+        r = requests.get(url, headers=headers, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            addr = data.get("address", {})
+            city = (
+                addr.get("city")
+                or addr.get("town")
+                or addr.get("village")
+                or addr.get("county")
+                or addr.get("state_district")
+                or addr.get("state")
+                or ""
+            )
+            return city.strip()
+    except Exception:
+        pass
+    return ""
+
+
 # ── Get stores available in user's location ─────────────────────────────────
 def get_city_tier(city: str) -> str:
     """Determine the tier for a given Indian city."""
     city_lower = city.lower().strip()
-    # Remove common suffixes
     city_lower = city_lower.replace(" city", "").replace(" urban", "").strip()
 
     for tier, cities in CITY_TIERS.items():
         for known_city in cities:
             if known_city in city_lower or city_lower in known_city:
                 return tier
-    # Default: if city name is reasonably long, assume tier2; else tier3
     return "tier2" if len(city_lower) > 2 else "tier3"
 
 
@@ -371,7 +393,7 @@ def extract_price(text: str):
         r'price[:\s]*₹?\s*([\d,]+(?:\.\d{1,2})?)',
         r'at\s*₹?\s*([\d,]+(?:\.\d{1,2})?)',
         r'for\s*₹?\s*([\d,]+(?:\.\d{1,2})?)',
-        r'\?\s*([\d,]+(?:\.\d{1,2})?)',  # Handle DDG replacing rupee symbol with question mark
+        r'\?\s*([\d,]+(?:\.\d{1,2})?)',
         r'"price"\s*:\s*"?([\d,.]+)',
         r'"selling_price"\s*:\s*"?([\d,.]+)',
     ]
@@ -400,9 +422,7 @@ def extract_price_from_json_ld(html: str) -> float | None:
                     items = data
                 else:
                     items = [data]
-
                 for item in items:
-                    # Check offers
                     offers = item.get("offers")
                     if offers:
                         if isinstance(offers, list):
@@ -414,7 +434,6 @@ def extract_price_from_json_ld(html: str) -> float | None:
                             price = offers.get("price")
                             if price:
                                 return float(str(price).replace(",", ""))
-
                     price = item.get("price")
                     if price:
                         return float(str(price).replace(",", ""))
@@ -426,7 +445,7 @@ def extract_price_from_json_ld(html: str) -> float | None:
 
 
 def clean_search_query(query: str) -> str:
-    """Strip filler words from search queries to make them more accurate for store search."""
+    """Strip filler words from search queries to make them more accurate."""
     filler_words = [
         "price", "buy", "online", "india", "best", "cheapest", "lowest",
         "offer", "deal", "discount", "shop", "purchase", "order",
@@ -450,10 +469,10 @@ def identify_from_image(client: OpenAI, image_bytes: bytes) -> dict:
   "brand": "brand name",
   "variant": "size or specs e.g. 1L / 8GB 512GB",
   "category": "grocery or electronics or other",
-  "search_query": "concise search query with brand model and key variant ONLY, no filler words like price/buy/online",
+  "search_query": "concise search terms: brand model variant ONLY",
   "store_category": "grocery_stores or electronics_stores"
 }
-IMPORTANT: search_query must be SHORT and SPECIFIC. Example: "Samsung Galaxy S24 Ultra 256GB" not "Samsung Galaxy S24 Ultra 256GB price buy online India best deal".
+IMPORTANT: search_query must be SHORT. Example: "Samsung Galaxy S24 Ultra 256GB" NOT "Samsung Galaxy S24 Ultra 256GB price buy online".
 Groceries/food/beverages/household → grocery_stores. Electronics/gadgets/appliances → electronics_stores."""
 
     raw = ai_call(client, [
@@ -463,7 +482,6 @@ Groceries/food/beverages/household → grocery_stores. Electronics/gadgets/appli
         ]}
     ], is_vision=True)
     result = parse_json_response(raw)
-    # Clean the search query
     if "search_query" in result:
         result["search_query"] = clean_search_query(result["search_query"])
     return result
@@ -480,22 +498,20 @@ Return ONLY a raw JSON object, no markdown:
   "brand": "brand name or empty string",
   "variant": "size/specs or empty string",
   "category": "grocery or electronics or other",
-  "search_query": "concise search keywords: brand + model + key variant ONLY",
+  "search_query": "concise search terms: brand + model + key spec ONLY",
   "store_category": "grocery_stores or electronics_stores"
 }}
 
-CRITICAL RULES for search_query:
-- Keep it SHORT: "OnePlus Nord CE 5" NOT "OnePlus Nord CE 5 price buy online India"
-- Include brand + model + key specs ONLY
-- Do NOT include words like: price, buy, online, India, best, cheapest, deal, offer
-- For grocery: include brand + product + pack size. Example: "Maggi 2-Minute Noodles 840g"
-- For electronics: include brand + model + storage/RAM. Example: "iPhone 16 128GB"
+search_query rules:
+- SHORT: "OnePlus Nord CE 5" NOT "OnePlus Nord CE 5 price buy online India"
+- Brand + model + key spec only
+- For grocery: "Maggi 2-Minute Noodles 840g"
+- For electronics: "iPhone 16 128GB"
 
-Grocery/Food → grocery_stores. Electronics/Gadgets/Phones/Laptops → electronics_stores."""
+Grocery/Food → grocery_stores. Electronics/Gadgets → electronics_stores."""
 
     raw = ai_call(client, [{"role": "user", "content": prompt}])
     result = parse_json_response(raw)
-    # Clean the search query
     if "search_query" in result:
         result["search_query"] = clean_search_query(result["search_query"])
     return result
@@ -511,92 +527,17 @@ def _get(url: str, timeout: int = 12) -> requests.Response | None:
     except Exception:
         return None
 
-def _scrape_amazon_direct(url: str) -> float | None:
-    """Fetch Amazon product page and extract price."""
-    r = _get(url)
-    if not r:
-        return None
-    soup = BeautifulSoup(r.text, "html.parser")
-    selectors = [
-        "span.priceToPay span.a-offscreen",
-        "span.apexPriceToPay span.a-offscreen",
-        "span.a-price span.a-offscreen",
-        "span.a-price-whole",
-        "span.a-color-price",
-        "span#priceblock_ourprice",
-        "span#priceblock_dealprice"
-    ]
-    for sel in selectors:
-        el = soup.select_one(sel)
-        if el:
-            price = extract_price(el.get_text())
-            if price:
-                return price
-    return None
 
-
-def _scrape_flipkart_direct(url: str) -> float | None:
-    """Fetch Flipkart product page and extract price."""
-    r = _get(url)
-    if not r:
-        return None
-    price = extract_price_from_json_ld(r.text)
-    if price:
-        return price
-    soup = BeautifulSoup(r.text, "html.parser")
-    selectors = [
-        "div.Nx9bqj",
-        "div._30jeq3",
-        "div._1_WHN1",
-        "div[class*='price']",
-        "span[class*='price']"
-    ]
-    for sel in selectors:
-        el = soup.select_one(sel)
-        if el:
-            price = extract_price(el.get_text())
-            if price:
-                return price
-    return None
-
-
-def _scrape_bigbasket_direct(url: str) -> float | None:
-    """Fetch BigBasket product page and extract price."""
-    r = _get(url)
-    if not r:
-        return None
-    price = extract_price_from_json_ld(r.text)
-    if price:
-        return price
-    price = extract_price(r.text[:80000])
-    return price
-
-
-def _scrape_generic_direct(url: str) -> float | None:
-    """Fetch generic product page and search for price."""
-    r = _get(url)
-    if not r:
-        return None
-    price = extract_price_from_json_ld(r.text)
-    if price:
-        return price
-    price = extract_price(r.text[:80000])
-    return price
-
-
-# ── Native search page scrapers (bypass DuckDuckGo for accuracy) ────────────
 def _scrape_amazon_search(query: str) -> dict | None:
-    """Scrape Amazon India search results page for the first matching product and price."""
+    """Scrape Amazon India search results for the first matching product and price."""
     url = f"https://www.amazon.in/s?k={urllib.parse.quote_plus(query)}"
     r = _get(url, timeout=15)
     if not r:
         return None
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # Find product cards in search results
     cards = soup.select("div[data-component-type='s-search-result']")
     if not cards:
-        # Fallback: look for result items
         cards = soup.select("div.s-result-item[data-asin]")
 
     accessory_words = [
@@ -605,28 +546,24 @@ def _scrape_amazon_search(query: str) -> dict | None:
         "holder", "stand", "mount", "ring", "grip", "sticker", "decal"
     ]
     query_lower = query.lower()
-    query_keywords = [w for w in query_lower.split() if len(w) > 2]  # Main keywords
+    query_keywords = [w for w in query_lower.split() if len(w) > 2]
 
-    for card in cards[:10]:  # Check top 10 results
-        # Skip sponsored/ad results
+    for card in cards[:10]:
         if card.select_one("span.s-label-popover-default"):
             continue
         asin = card.get("data-asin", "")
         if not asin:
             continue
 
-        # Get the title
         title_el = card.select_one("h2 a span") or card.select_one("h2 span") or card.select_one(".a-text-normal")
         title = title_el.get_text(strip=True) if title_el else ""
         title_lower = title.lower()
 
-        # Verify title contains main keywords from query (avoid wrong products)
         if query_keywords:
             matches_query = sum(1 for kw in query_keywords if kw in title_lower)
-            if matches_query < len(query_keywords) // 2:  # At least half of keywords must match
+            if matches_query < len(query_keywords) // 2:
                 continue
 
-        # Skip accessories
         is_accessory = False
         for kw in accessory_words:
             if kw in title_lower and kw not in query_lower:
@@ -635,14 +572,12 @@ def _scrape_amazon_search(query: str) -> dict | None:
         if is_accessory:
             continue
 
-        # Extract price
         price_el = (card.select_one("span.a-price span.a-offscreen") or
                     card.select_one("span.a-price-whole") or
                     card.select_one("span.a-color-price"))
         if price_el:
             price = extract_price(price_el.get_text())
             if price:
-                # Build product URL
                 link_el = card.select_one("h2 a")
                 product_link = f"https://www.amazon.in/dp/{asin}" if asin else url
                 if link_el and link_el.get("href"):
@@ -655,15 +590,13 @@ def _scrape_amazon_search(query: str) -> dict | None:
 
 
 def _scrape_flipkart_search(query: str) -> dict | None:
-    """Scrape Flipkart search results page for the first matching product and price."""
+    """Scrape Flipkart search results for the first matching product and price."""
     url = f"https://www.flipkart.com/search?q={urllib.parse.quote_plus(query)}"
     r = _get(url, timeout=15)
     if not r:
         return None
 
-    # Try JSON-LD first
     price_from_ld = extract_price_from_json_ld(r.text)
-
     soup = BeautifulSoup(r.text, "html.parser")
 
     accessory_words = [
@@ -672,9 +605,8 @@ def _scrape_flipkart_search(query: str) -> dict | None:
         "holder", "stand", "mount", "ring", "grip", "sticker", "decal"
     ]
     query_lower = query.lower()
-    query_keywords = [w for w in query_lower.split() if len(w) > 2]  # Main keywords
+    query_keywords = [w for w in query_lower.split() if len(w) > 2]
 
-    # Flipkart uses various card structures - try multiple selectors
     product_links = soup.select("a[href*='/p/']")
     if not product_links:
         product_links = soup.select("a[href*='pid=']")
@@ -686,7 +618,6 @@ def _scrape_flipkart_search(query: str) -> dict | None:
         if not href.startswith("http"):
             href = "https://www.flipkart.com" + href
 
-        # Get the card container (parent of the link)
         card = link_el
         for _ in range(5):
             parent = card.parent
@@ -697,13 +628,11 @@ def _scrape_flipkart_search(query: str) -> dict | None:
 
         card_text = card.get_text(" ", strip=True).lower()
 
-        # Verify this is the right product (check keywords match)
         if query_keywords:
             matches_query = sum(1 for kw in query_keywords if kw in card_text)
             if matches_query < len(query_keywords) // 2:
                 continue
 
-        # Skip accessories
         is_accessory = False
         for kw in accessory_words:
             if kw in card_text and kw not in query_lower:
@@ -712,7 +641,6 @@ def _scrape_flipkart_search(query: str) -> dict | None:
         if is_accessory:
             continue
 
-        # Look for price in the card container
         price_el = (card.select_one("div.Nx9bqj") or
                     card.select_one("div._30jeq3") or
                     card.select_one("div._1_WHN1") or
@@ -729,31 +657,28 @@ def _scrape_flipkart_search(query: str) -> dict | None:
                 title = title_el.get_text(strip=True) if title_el else ""
                 return {"price": price, "link": href, "title": title}
 
-        # Try extracting price from card text
         price = extract_price(card.get_text())
         if price:
             return {"price": price, "link": href, "title": ""}
 
-    # Fallback: try any price on the page with JSON-LD
     if price_from_ld:
         return {"price": price_from_ld, "link": url, "title": ""}
-
     return None
 
 
-# Price sanity bounds per category — skip results outside these ranges
+# Price sanity bounds per category
 PRICE_BOUNDS = {
-    "electronics_stores": (500, 10_000_000),    # Electronics: ₹500 – ₹1Cr
-    "grocery_stores":     (5, 50_000),           # Grocery: ₹5 – ₹50K
+    "electronics_stores": (500, 10_000_000),
+    "grocery_stores":     (5, 50_000),
 }
 
-# ── LangChain DuckDuckGo Search helpers ────────────────────────────────
-def _ddg_search_simple(query: str, max_results: int = 8) -> list:
-    """Simple DuckDuckGo search. Returns list of {title, snippet, link} dicts."""
+# ── DuckDuckGo Search ──────────────────────────────────────────────────
+def _ddg_search(query: str, max_results: int = 10) -> list:
+    """DuckDuckGo search with retries. Returns list of {title, snippet, link} dicts."""
     for attempt in range(3):
         try:
             if attempt > 0:
-                time.sleep(1.0 * attempt)
+                time.sleep(1.5 * attempt)
             wrapper = DuckDuckGoSearchAPIWrapper(
                 max_results=max_results,
                 region="in-en",
@@ -770,63 +695,20 @@ def _ddg_search_simple(query: str, max_results: int = 8) -> list:
     return []
 
 
-def _ddg_search_for_store(store_name: str, query: str) -> dict | None:
-    """Search DDG for a specific product on a specific store. Returns {price, snippet} or None."""
-    domain = STORE_DOMAINS.get(store_name, "")
-    if not domain:
-        return None
-
-    # Use site-specific search for accurate results
-    search_query = f'"{query}" price site:{domain}'
-    results = _ddg_search_simple(search_query, max_results=5)
-
-    if not results:
-        # Fallback: less restrictive search
-        search_query = f'{query} site:{domain}'
-        results = _ddg_search_simple(search_query, max_results=5)
-
-    if not results:
-        return None
-
-    # Extract price from snippets
-    for r in results:
-        snippet = r.get("snippet", "")
-        title = r.get("title", "")
-        link = r.get("link", "")
-        combined_text = f"{title} {snippet}"
-
-        price = extract_price(combined_text)
-        if price:
-            return {
-                "price": price,
-                "snippet": combined_text[:200],
-                "link": link,
-            }
-
-    # Return snippets even without price (AI can analyze them)
-    best = results[0]
-    return {
-        "price": None,
-        "snippet": f"{best.get('title', '')} | {best.get('snippet', '')}",
-        "link": best.get("link", ""),
-    }
-
-
 def fetch_prices(product: dict, client: OpenAI = None, user_city: str = None) -> list:
     """
     Multi-strategy price fetching:
-    1. Try direct store scraping first (Amazon, Flipkart)
-    2. Run parallel per-store DDG searches
-    3. Use AI to validate and fill gaps from snippets
-    4. Filter results based on location availability
+    1. Broad DDG web searches to collect real price snippets
+    2. Try direct store scraping (Amazon, Flipkart)
+    3. AI analyzes ALL collected data + uses training knowledge
+    4. Filter by location availability
     """
     store_category = product.get("store_category", "electronics_stores")
 
-    # Get all stores for this category
     all_category_stores = (GROCERY_STORES if store_category == "grocery_stores"
                            else ELECTRONICS_STORES)
 
-    # Filter by user's location availability
+    # Filter by location
     if user_city:
         available_stores = get_available_stores(user_city, store_category)
         category_stores = [s for s in all_category_stores if s in available_stores]
@@ -834,129 +716,181 @@ def fetch_prices(product: dict, client: OpenAI = None, user_city: str = None) ->
         category_stores = all_category_stores
 
     query = product.get("search_query", product.get("name", ""))
-    # Ensure query is clean
     query = clean_search_query(query)
+    product_name = product.get("name", query)
 
-    bar = st.progress(0, text="🔍 Searching for best prices…")
+    bar = st.progress(0, text="Searching for best prices...")
     found_stores = {}
 
-    # ── Step 1: Try native store scraping (fastest + most reliable) ──
-    bar.progress(10, text="🔍 Checking store sites directly…")
+    # ── Step 1: Broad DDG searches to collect price data ──
+    bar.progress(10, text="Searching the web for prices...")
+
+    all_snippets = []
+    store_snippets = {}  # per-store snippets
+
+    # Search 1: General price search (most likely to return actual prices)
+    search_queries = [
+        f"{query} price India",
+        f"{query} buy Amazon Flipkart Croma",
+    ]
+    if store_category == "grocery_stores":
+        search_queries = [
+            f"{query} price India",
+            f"{query} BigBasket Blinkit JioMart",
+        ]
+
+    for sq in search_queries:
+        try:
+            results = _ddg_search(sq, max_results=10)
+            for r in results:
+                title = r.get("title", "")
+                snippet = r.get("snippet", "")
+                link = r.get("link", "")
+                combined = f"{title} | {snippet}"
+                all_snippets.append(combined)
+
+                # Attribute snippet to a store if its domain appears in the link
+                for store, domain in STORE_DOMAINS.items():
+                    if domain in link:
+                        if store not in store_snippets:
+                            store_snippets[store] = []
+                        store_snippets[store].append({
+                            "text": combined,
+                            "link": link,
+                            "price": extract_price(combined),
+                        })
+                        break
+            if all_snippets:
+                break  # Got results, no need for more searches
+        except Exception:
+            pass
+
+    # Search 2: Store-specific searches for stores we didn't find yet
+    bar.progress(30, text="Checking specific stores...")
+    missing_stores = [s for s in category_stores if s not in store_snippets]
+
+    for store in missing_stores[:3]:  # Limit to avoid rate-limiting
+        domain = STORE_DOMAINS.get(store, "")
+        if not domain:
+            continue
+        try:
+            results = _ddg_search(f"{query} site:{domain}", max_results=5)
+            for r in results:
+                title = r.get("title", "")
+                snippet = r.get("snippet", "")
+                link = r.get("link", "")
+                combined = f"{title} | {snippet}"
+                all_snippets.append(combined)
+                if store not in store_snippets:
+                    store_snippets[store] = []
+                store_snippets[store].append({
+                    "text": combined,
+                    "link": link,
+                    "price": extract_price(combined),
+                })
+            time.sleep(0.3)  # Small delay to avoid rate-limiting
+        except Exception:
+            pass
+
+    # ── Step 2: Direct store scraping ──
+    bar.progress(50, text="Scraping store pages...")
 
     if store_category == "electronics_stores":
-        # Try Amazon search scraping
-        try:
-            amazon_result = _scrape_amazon_search(query)
-            if amazon_result and amazon_result.get("price"):
-                found_stores["Amazon India"] = {
-                    "site": "Amazon India",
-                    "link": amazon_result.get("link", STORE_SEARCH_URLS["Amazon India"](query)),
-                    "price": amazon_result["price"],
-                    "source": "direct",
-                }
-        except Exception:
-            pass
+        # Try Amazon direct scraping
+        if "Amazon India" in category_stores and "Amazon India" not in found_stores:
+            try:
+                result = _scrape_amazon_search(query)
+                if result and result.get("price"):
+                    found_stores["Amazon India"] = {
+                        "site": "Amazon India",
+                        "link": result.get("link", STORE_SEARCH_URLS["Amazon India"](query)),
+                        "price": result["price"],
+                        "source": "direct",
+                    }
+            except Exception:
+                pass
 
-        # Try Flipkart search scraping
-        try:
-            flipkart_result = _scrape_flipkart_search(query)
-            if flipkart_result and flipkart_result.get("price"):
-                found_stores["Flipkart"] = {
-                    "site": "Flipkart",
-                    "link": flipkart_result.get("link", STORE_SEARCH_URLS["Flipkart"](query)),
-                    "price": flipkart_result["price"],
-                    "source": "direct",
-                }
-        except Exception:
-            pass
+        # Try Flipkart direct scraping
+        if "Flipkart" in category_stores and "Flipkart" not in found_stores:
+            try:
+                result = _scrape_flipkart_search(query)
+                if result and result.get("price"):
+                    found_stores["Flipkart"] = {
+                        "site": "Flipkart",
+                        "link": result.get("link", STORE_SEARCH_URLS["Flipkart"](query)),
+                        "price": result["price"],
+                        "source": "direct",
+                    }
+            except Exception:
+                pass
 
-    # ── Step 2: Parallel per-store DDG searches ──
-    bar.progress(30, text="🔍 Searching each store…")
-
-    # Only search stores we haven't found yet
-    stores_to_search = [s for s in category_stores if s not in found_stores]
-    ddg_results = {}
-
-    if stores_to_search:
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            future_to_store = {
-                executor.submit(_ddg_search_for_store, store, query): store
-                for store in stores_to_search
-            }
-            for future in as_completed(future_to_store, timeout=30):
-                store = future_to_store[future]
-                try:
-                    result = future.result()
-                    if result:
-                        ddg_results[store] = result
-                        if result.get("price"):
-                            found_stores[store] = {
-                                "site": store,
-                                "link": result.get("link", STORE_SEARCH_URLS[store](query)),
-                                "price": result["price"],
-                                "source": "ddg",
-                            }
-                except Exception:
-                    pass
-
-    # ── Step 3: Use AI to validate and fill remaining gaps ──
-    bar.progress(65, text="🤖 AI validating prices…")
-
-    # Collect all snippet data for AI
-    snippet_data = {}
+    # ── Step 2b: Use DDG snippet prices ──
     for store in category_stores:
-        if store in ddg_results:
-            snippet_data[store] = ddg_results[store].get("snippet", "")
-        elif store in found_stores and found_stores[store].get("source") == "direct":
-            snippet_data[store] = f"Direct scrape found price: ₹{found_stores[store]['price']:,.0f}"
+        if store in found_stores:
+            continue
+        if store in store_snippets:
+            for s in store_snippets[store]:
+                if s.get("price"):
+                    lo, hi = PRICE_BOUNDS.get(store_category, (5, 10_000_000))
+                    if lo <= s["price"] <= hi:
+                        found_stores[store] = {
+                            "site": store,
+                            "link": s.get("link", STORE_SEARCH_URLS[store](query)),
+                            "price": s["price"],
+                            "source": "ddg",
+                        }
+                        break
+
+    # ── Step 3: AI to fill ALL remaining gaps using snippets + knowledge ──
+    bar.progress(70, text="AI analyzing prices...")
 
     stores_needing_price = [s for s in category_stores if s not in found_stores]
 
-    if client and (stores_needing_price or snippet_data):
+    if client and stores_needing_price:
         try:
-            stores_list = ", ".join(category_stores)
+            # Build context from all collected data
+            snippet_context = "\n".join(f"  - {s[:250]}" for s in all_snippets[:15]) if all_snippets else "  No web results found."
 
-            # Build per-store snippet info
-            snippet_lines = []
-            for store in category_stores:
-                if store in snippet_data and snippet_data[store]:
-                    snippet_lines.append(f"  {store}: {snippet_data[store][:300]}")
-                elif store in found_stores:
-                    snippet_lines.append(f"  {store}: Already found ₹{found_stores[store]['price']:,.0f}")
-                else:
-                    snippet_lines.append(f"  {store}: No data found")
+            # Show what we already found
+            found_context = ""
+            if found_stores:
+                found_lines = [f"  {s}: Rs.{d['price']:,.0f} (verified from {d['source']})"
+                               for s, d in found_stores.items()]
+                found_context = "\nALREADY VERIFIED PRICES:\n" + "\n".join(found_lines)
 
-            snippets_text = "\n".join(snippet_lines)
+            stores_needed = ", ".join(stores_needing_price)
 
-            prompt = f"""You are a STRICT price comparison expert for India. Your ONLY job is accuracy.
+            prompt = f"""You are an Indian e-commerce price expert. Return CURRENT real prices for this product.
 
-PRODUCT: "{query}"
-Product name: "{product.get('name', query)}"
-Category: {store_category}
+PRODUCT: "{product_name}"
+SEARCH QUERY: "{query}"
+CATEGORY: {"Electronics" if store_category == "electronics_stores" else "Grocery"}
 
-DATA FROM WEB SEARCH (per store):
-{snippets_text}
+WEB SEARCH DATA:
+{snippet_context}
+{found_context}
 
-MANDATORY RULES:
-1. ONLY return the price for the EXACT product "{product.get('name', query)}"
-2. If web data shows a price for the right product, USE that price
-3. If no web data exists for a store, use your knowledge of current Indian market prices
-4. REJECT accessories/covers/cases/chargers - NOT the product
-5. REJECT completely different products
-6. Prices must be in INR and realistic for India
-7. If genuinely unsure, set price to null
-8. ALL prices must be for the SAME variant/model
+I NEED PRICES FOR THESE STORES: {stores_needed}
 
-Return ONLY a valid JSON array (no markdown, no explanation):
-[
-  {{"store": "StoreName", "price": 25000}},
-  {{"store": "StoreName2", "price": null}}
-]
+INSTRUCTIONS:
+1. Use the web search data above if it contains prices for the correct product
+2. If web data is missing for a store, use your TRAINING KNOWLEDGE of current Indian market prices
+3. Most popular products are sold at similar prices across stores (within 5-15% range)
+4. For electronics: Amazon and Flipkart usually have the best prices, Croma/Reliance are slightly higher
+5. For grocery: prices are usually very similar across Blinkit/Zepto/BigBasket
+6. If you found verified prices above, other stores should be in a similar range
+7. ONLY set null if you truly have NO idea about this product's price
+8. Prices must be in INR
 
-Return entries for ONLY these stores: {stores_list}"""
+Return ONLY a valid JSON array, no markdown, no explanation:
+[{{"store": "StoreName", "price": 25000}}, {{"store": "Store2", "price": null}}]
+
+Return ONLY entries for: {stores_needed}"""
 
             raw = ai_call(client, [{"role": "user", "content": prompt}])
             cleaned = re.sub(r'```(?:json)?\s*\n?', '', raw.strip()).strip()
+            # Remove thinking tags if present
+            cleaned = re.sub(r'<think>.*?</think>', '', cleaned, flags=re.DOTALL).strip()
             m = re.search(r'\[.*\]', cleaned, re.DOTALL)
             if m:
                 store_data = json.loads(m.group(0))
@@ -965,7 +899,6 @@ Return entries for ONLY these stores: {stores_list}"""
                     store_name = item.get("store", "")
                     price = item.get("price")
 
-                    # Find matching store
                     matched = None
                     for cs in category_stores:
                         if cs.lower() in store_name.lower() or store_name.lower() in cs.lower():
@@ -975,16 +908,14 @@ Return entries for ONLY these stores: {stores_list}"""
                     if not matched:
                         continue
 
-                    # Don't overwrite direct scrape or DDG results with AI
-                    if matched in found_stores and found_stores[matched].get("source") in ("direct", "ddg"):
+                    # Don't overwrite direct/ddg results
+                    if matched in found_stores:
                         continue
 
-                    # Validate price
                     if price is not None:
                         try:
                             price = float(price)
                             lo, hi = PRICE_BOUNDS.get(store_category, (5, 10_000_000))
-
                             if lo <= price <= hi:
                                 found_stores[matched] = {
                                     "site": matched,
@@ -997,11 +928,11 @@ Return entries for ONLY these stores: {stores_list}"""
         except Exception:
             pass
 
-    bar.progress(100, text="✅ Done!")
+    bar.progress(100, text="Done!")
     time.sleep(0.3)
     bar.empty()
 
-    # ── Build final results: stores with price first, then without ──
+    # ── Build final results ──
     for store in category_stores:
         if store not in found_stores:
             found_stores[store] = {
@@ -1022,7 +953,6 @@ def result_card(item: dict, rank: int):
     price_val = item.get("price")
     link = item.get("link", "#")
 
-    # Extract display domain from the link
     try:
         parsed = urllib.parse.urlparse(link)
         display_domain = parsed.netloc.replace("www.", "")
@@ -1030,10 +960,10 @@ def result_card(item: dict, rank: int):
         display_domain = ""
 
     if price_val is not None:
-        price_display = f'₹{price_val:,.0f}'
+        price_display = f'Rs.{price_val:,.0f}'
         best = '<span class="ph-best">BEST PRICE</span>' if rank == 1 else ""
     else:
-        price_display = '<span style="font-size: 0.95rem; color: #b8a99a; font-weight: 600;">Price not available — click to check</span>'
+        price_display = '<span style="font-size: 0.95rem; color: #b8a99a; font-weight: 600;">Click to check price on store</span>'
         best = ""
 
     st.markdown(f"""
@@ -1045,14 +975,14 @@ def result_card(item: dict, rank: int):
       <div class="ph-link">🔗 {display_domain}</div>
       <div class="ph-price">{price_display}</div>
     </div>
-    <a href="{link}" target="_blank" rel="noopener noreferrer" class="ph-buy">Buy Now →</a>
+    <a href="{link}" target="_blank" rel="noopener noreferrer" class="ph-buy">Buy Now &rarr;</a>
   </div>
 </div>""", unsafe_allow_html=True)
 
 
 # ── Main App ──────────────────────────────────────────────────────────────────
 def main():
-    # ── JS: Kill Streamlit badges that CSS can't reach (iframes / shadow DOM) ──
+    # ── JS: Kill Streamlit badges ──
     st.markdown("""
 <script>
 (function hideSLBadges() {
@@ -1072,7 +1002,6 @@ def main():
                 el.style.setProperty('display', 'none', 'important');
             });
         });
-        // Also hide any fixed-position elements at bottom corners (crown/M badges)
         document.querySelectorAll('*').forEach(function(el) {
             var st = window.getComputedStyle(el);
             if (st.position === 'fixed' && (parseInt(st.bottom) < 80) &&
@@ -1097,12 +1026,11 @@ def main():
     st.markdown('<div class="ph-title">🛒 PriceHunt</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="ph-subtitle">Type a product or upload a photo '
-        '→ compare prices across Indian stores instantly</div>',
+        '&rarr; compare prices across Indian stores instantly</div>',
         unsafe_allow_html=True
     )
 
-
-    # ── API Key (only OpenRouter needed now) ──────────────────────────────────
+    # ── API Key ───────────────────────────────────────────────────────────────
     openrouter_key = None
     try:
         openrouter_key = st.secrets.get("OPENROUTER_API_KEY")
@@ -1119,16 +1047,16 @@ def main():
             )
             st.caption("[Get free key →](https://openrouter.ai/keys)  No credit card needed")
         else:
-            st.success("✅ OpenRouter key loaded")
+            st.success("OpenRouter key loaded")
 
         st.markdown("---")
         st.markdown("**How it works**")
         st.markdown(
-            "- 🤖 AI identifies your product\n"
-            "- 📍 Shows stores in your city\n"
-            "- 🔍 Searches each store directly\n"
-            "- 🛒 Shows cheapest prices\n"
-            "- 🔗 Buy Now → goes direct to store"
+            "- AI identifies your product\n"
+            "- Shows stores in your city\n"
+            "- Searches each store directly\n"
+            "- Shows cheapest prices\n"
+            "- Buy Now goes direct to store"
         )
 
     if not openrouter_key:
@@ -1140,56 +1068,120 @@ def main():
     <li>Go to <a href="https://openrouter.ai/keys" target="_blank">openrouter.ai/keys</a></li>
     <li>Sign in with Google or GitHub (free)</li>
     <li>Click <strong>Create Key</strong></li>
-    <li>Paste it in the sidebar 👈</li>
+    <li>Paste it in the sidebar</li>
   </ol>
   <div class="ph-free-note">
-    ✅ 100% Free &nbsp;·&nbsp; No credit card &nbsp;·&nbsp; No SerpAPI needed
+    100% Free &middot; No credit card &middot; No SerpAPI needed
   </div>
 </div>""", unsafe_allow_html=True)
         st.stop()
 
     client = make_client(openrouter_key)
 
-    # ── Location input — ABOVE the search bar ─────────────────────────────────
+    # ── LOCATION: Auto-detect via browser geolocation popup ──────────────────
+    # Initialize session state for location
+    if "detected_city" not in st.session_state:
+        st.session_state.detected_city = ""
+    if "geo_requested" not in st.session_state:
+        st.session_state.geo_requested = False
+
+    # Check if coordinates came back via query params
+    params = st.query_params
+    lat_param = params.get("lat")
+    lng_param = params.get("lng")
+
+    if lat_param and lng_param and not st.session_state.detected_city:
+        try:
+            lat = float(lat_param)
+            lng = float(lng_param)
+            city = reverse_geocode(lat, lng)
+            if city:
+                st.session_state.detected_city = city
+                st.session_state.geo_requested = True
+        except (ValueError, TypeError):
+            pass
+
+    # Inject geolocation JavaScript (only once, if not already detected)
+    if not st.session_state.detected_city and not st.session_state.geo_requested:
+        components.html("""
+        <script>
+        (function() {
+            // Only request if we haven't already
+            var params = new URLSearchParams(window.parent.location.search);
+            if (params.has('lat') && params.has('lng')) return;
+
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    function(pos) {
+                        var lat = pos.coords.latitude.toFixed(4);
+                        var lng = pos.coords.longitude.toFixed(4);
+                        var url = new URL(window.parent.location);
+                        url.searchParams.set('lat', lat);
+                        url.searchParams.set('lng', lng);
+                        window.parent.location.href = url.toString();
+                    },
+                    function(err) {
+                        // User denied or error — do nothing, they can type manually
+                        console.log('Geolocation denied or failed:', err.message);
+                    },
+                    { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 }
+                );
+            }
+        })();
+        </script>
+        """, height=0)
+
+    # Location display — above search bar
     st.markdown('<div class="ph-section">📍 Your Location</div>', unsafe_allow_html=True)
 
     loc_col1, loc_col2 = st.columns([3, 1])
     with loc_col1:
         user_city = st.text_input(
             "location_input",
-            placeholder="Enter your city — e.g., Mumbai, Delhi, Bangalore, Lucknow",
+            value=st.session_state.detected_city,
+            placeholder="Detecting your location... or type your city",
             label_visibility="collapsed",
             key="user_city_input",
         )
     with loc_col2:
         if user_city:
             tier = get_city_tier(user_city)
-            tier_labels = {"metro": "🟢 All stores", "tier1_5": "🟡 Most stores", "tier2": "🟠 Major stores", "tier3": "🔴 Online only"}
+            tier_labels = {
+                "metro": "🟢 All stores",
+                "tier1_5": "🟡 Most stores",
+                "tier2": "🟠 Major stores",
+                "tier3": "🔴 Online only",
+            }
             st.markdown(
                 f'<div style="padding:0.45rem 0; font-size:0.82rem; color:#78716c;">'
-                f'{tier_labels.get(tier, "🟠 Major stores")}</div>',
+                f'{tier_labels.get(tier, "Major stores")}</div>',
                 unsafe_allow_html=True
             )
         else:
             st.markdown(
                 '<div style="padding:0.45rem 0; font-size:0.82rem; color:#b8a99a;">'
-                'Shows all stores</div>',
+                'Detecting...</div>',
                 unsafe_allow_html=True
             )
+
+    # Update session state if user manually types
+    if user_city and user_city != st.session_state.detected_city:
+        st.session_state.detected_city = user_city
 
     if user_city:
         avail_grocery = get_available_stores(user_city, "grocery_stores")
         avail_elec = get_available_stores(user_city, "electronics_stores")
+        auto_tag = " (auto-detected)" if lat_param and lng_param else ""
         st.markdown(
             f'<div style="font-size:0.78rem; color:#78716c; margin-bottom:0.8rem;">'
-            f'📍 <strong style="color:#1c1917;">{user_city}</strong> — '
+            f'📍 <strong style="color:#1c1917;">{user_city}</strong>{auto_tag} — '
             f'{len(avail_grocery)} grocery stores · {len(avail_elec)} electronics stores available</div>',
             unsafe_allow_html=True
         )
     else:
         st.markdown(
             '<div style="font-size:0.78rem; color:#b8a99a; margin-bottom:0.8rem;">'
-            '💡 Enter your city to see stores available in your area</div>',
+            'Allow location access or type your city to see stores in your area</div>',
             unsafe_allow_html=True
         )
 
@@ -1267,33 +1259,32 @@ def main():
     product = None
 
     if mode == "📸 Upload product image" and uploaded_file:
-        with st.spinner("🤖 AI is reading your image…"):
+        with st.spinner("AI is reading your image..."):
             try:
                 product = identify_from_image(client, uploaded_file.read())
             except Exception as e:
-                st.error(f"❌ Could not identify product: {e}")
+                st.error(f"Could not identify product: {e}")
                 return
 
     elif mode == "📝 Type product name" and text_query:
-        with st.spinner("🤖 AI is analysing your query…"):
+        with st.spinner("AI is analysing your query..."):
             try:
                 product = identify_from_text(client, text_query.strip(), category)
             except Exception as e:
-                st.error(f"❌ Error: {e}")
+                st.error(f"Error: {e}")
                 return
 
     if not product:
-        st.error("❌ Could not identify product. Please try again.")
+        st.error("Could not identify product. Please try again.")
         return
 
     # Show product info
     cat_emoji = {"grocery": "🛒", "electronics": "📱", "fashion": "👗",
                  "home": "🏠", "beauty": "💄"}.get(product.get("category", ""), "📦")
 
-    # Get available stores based on location
     if user_city:
         available_stores = get_available_stores(user_city, product.get("store_category", "electronics_stores"))
-        stores_label = ", ".join(available_stores) if available_stores else "No stores available in your area"
+        stores_label = ", ".join(available_stores) if available_stores else "No stores in your area"
         location_tag = f" in {user_city}"
     else:
         stores_label = (
@@ -1305,24 +1296,23 @@ def main():
 
     st.markdown(f"""
 <div class="ph-product">
-  <div style="font-size:1.1rem;font-weight:700;">{cat_emoji} {product.get('name','—')}</div>
+  <div style="font-size:1.1rem;font-weight:700;">{cat_emoji} {product.get('name','--')}</div>
   <div style="font-size:0.85rem;margin-top:0.3rem;color:#78716c;">
-    Brand: <strong>{product.get('brand') or '—'}</strong> &nbsp;·&nbsp;
-    Variant: <strong>{product.get('variant') or '—'}</strong>
+    Brand: <strong>{product.get('brand') or '--'}</strong> &nbsp;&middot;&nbsp;
+    Variant: <strong>{product.get('variant') or '--'}</strong>
   </div>
-  <div style="font-size:0.8rem;margin-top:0.3rem;color:#92400e;">🏪 Searching{location_tag}: {stores_label}</div>
-  <div style="font-size:0.75rem;margin-top:0.3rem;color:#b8a99a;">🔍 Search query: "{product.get('search_query', '')}"</div>
+  <div style="font-size:0.8rem;margin-top:0.3rem;color:#92400e;">Searching{location_tag}: {stores_label}</div>
 </div>""", unsafe_allow_html=True)
 
     # Fetch & show prices
-    st.markdown('<div class="ph-section">Price Comparison — Cheapest First</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ph-section">Price Comparison &mdash; Cheapest First</div>', unsafe_allow_html=True)
     results = fetch_prices(product, client=client, user_city=user_city)
 
     if not results:
         query = product.get("search_query", product.get("name", ""))
         stores = (GROCERY_STORES if product.get("store_category") == "grocery_stores"
                   else ELECTRONICS_STORES)
-        st.warning("😕 Could not fetch prices automatically. Browse stores directly:")
+        st.warning("Could not fetch prices automatically. Browse stores directly:")
         links_html = ""
         for store in stores:
             url = STORE_SEARCH_URLS[store](query)
@@ -1333,11 +1323,9 @@ def main():
                 f'text-decoration:none;margin:4px;">🔗 {store}</a>\n'
             )
         st.markdown(f'<div style="margin-top:0.5rem;">{links_html}</div>', unsafe_allow_html=True)
-        st.info('💡 Tip: Be specific — "Samsung Galaxy S24 Ultra 256GB" not "Samsung phone"')
         return
 
     results_with_price = [r for r in results if r["price"] is not None]
-    results_no_price = [r for r in results if r["price"] is None]
 
     st.markdown(
         f'<div style="color:#78716c;font-size:0.88rem;margin-bottom:0.8rem;">'
@@ -1354,7 +1342,7 @@ def main():
         if save > 0:
             st.markdown(f"""
 <div class="ph-savings">
-  <div class="ph-savings-amt">💰 Save ₹{save:,.0f} ({pct:.0f}%)</div>
+  <div class="ph-savings-amt">Save Rs.{save:,.0f} ({pct:.0f}%)</div>
   <div class="ph-savings-sub">
     Buy from <strong>{results_with_price[0]['site']}</strong>
     instead of <strong>{results_with_price[-1]['site']}</strong>
@@ -1363,7 +1351,7 @@ def main():
 
     st.markdown(
         '<div style="text-align:center;color:#b8a99a;font-size:0.74rem;margin-top:1rem;">'
-        '⚠️ Prices sourced via web search. Always verify on the store before purchasing.</div>',
+        'Prices sourced via web search + AI. Always verify on the store before purchasing.</div>',
         unsafe_allow_html=True
     )
 
