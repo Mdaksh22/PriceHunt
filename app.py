@@ -559,22 +559,9 @@ def scrape_flipkart(query: str) -> dict | None:
     return None
 
 
-# ── SCRAPER: Generic store page ──────────────────────────────────────────────
-def scrape_store_page(store_name: str, query: str) -> dict | None:
-    """Scrape the store's own search page for a price."""
-    url = STORE_SEARCH_URLS[store_name](query)
-    r = _get(url)
-    if not r:
-        return None
-    # Try JSON-LD structured data first (most reliable)
-    price = extract_price_from_json_ld(r.text)
-    if price:
-        return {"price": price, "link": url, "title": "", "source": STORE_DOMAINS.get(store_name, "")}
-    # Try extracting from visible text (first 80K chars)
-    price = extract_price(r.text[:80000])
-    if price:
-        return {"price": price, "link": url, "title": "", "source": STORE_DOMAINS.get(store_name, "")}
-    return None
+# NOTE: Generic store page scraping REMOVED — it was extracting random prices
+# from page navigation/headers/unrelated products. Only Amazon & Flipkart have
+# dedicated scrapers with product-title verification.
 
 
 # ── DuckDuckGo — search for REAL prices from web ────────────────────────────
@@ -672,10 +659,12 @@ def ddg_find_store_prices(query: str, stores: list) -> dict:
 # ── MAIN PRICE FETCHING — ALL PRICES FROM REAL SOURCES ───────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fetch_prices(product: dict, user_city: str = None) -> list:
+def fetch_prices(product: dict, client: OpenAI = None, user_city: str = None) -> list:
     """
-    Fetch REAL prices from actual websites. NO AI guessing.
-    Every price shown is scraped from an actual web source.
+    Fetch prices using multiple strategies:
+    1. Direct scraping of Amazon/Flipkart (verified product match)
+    2. DDG web search for real prices from web results
+    3. AI reads REAL web snippets and extracts prices (not guessing)
     """
     store_category = product.get("store_category", "electronics_stores")
     all_stores = GROCERY_STORES[:] if store_category == "grocery_stores" else ELECTRONICS_STORES[:]
@@ -687,46 +676,45 @@ def fetch_prices(product: dict, user_city: str = None) -> list:
         stores = all_stores
 
     query = clean_search_query(product.get("search_query", product.get("name", "")))
+    product_name = product.get("name", query)
     lo, hi = (5, 50_000) if store_category == "grocery_stores" else (500, 10_000_000)
 
     bar = st.progress(0, text="Searching stores for real prices...")
     found = {}  # store_name -> {site, link, price, source}
 
-    # ── Phase 1: Direct scraping of store search pages (parallel) ──
-    bar.progress(10, text="Scraping store websites directly...")
+    # ── Phase 1: Direct scraping Amazon & Flipkart (parallel) ──
+    bar.progress(10, text="Checking Amazon and Flipkart...")
 
-    def _scrape_one(store_name):
-        """Try to scrape a store's search page for the real price."""
-        if store_name == "Amazon India":
-            return store_name, scrape_amazon(query)
-        elif store_name == "Flipkart":
-            return store_name, scrape_flipkart(query)
-        else:
-            return store_name, scrape_store_page(store_name, query)
+    scrapers = {}
+    if "Amazon India" in stores:
+        scrapers["Amazon India"] = scrape_amazon
+    if "Flipkart" in stores:
+        scrapers["Flipkart"] = scrape_flipkart
 
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        futures = {executor.submit(_scrape_one, s): s for s in stores}
-        for future in as_completed(futures, timeout=25):
-            try:
-                store_name, result = future.result()
-                if result and result.get("price"):
-                    price = result["price"]
-                    if lo <= price <= hi:
-                        found[store_name] = {
-                            "site": store_name,
-                            "link": result.get("link", STORE_SEARCH_URLS[store_name](query)),
-                            "price": price,
-                            "source": result.get("source", "store website"),
-                        }
-            except Exception:
-                pass
+    if scrapers:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {executor.submit(fn, query): name for name, fn in scrapers.items()}
+            for future in as_completed(futures, timeout=20):
+                store_name = futures[future]
+                try:
+                    result = future.result()
+                    if result and result.get("price"):
+                        price = result["price"]
+                        if lo <= price <= hi:
+                            found[store_name] = {
+                                "site": store_name,
+                                "link": result.get("link", STORE_SEARCH_URLS[store_name](query)),
+                                "price": price,
+                                "source": result.get("source", "store website"),
+                            }
+                except Exception:
+                    pass
 
-    bar.progress(45, text=f"Found {len(found)} prices from stores, searching web...")
+    bar.progress(35, text=f"Found {len(found)} from direct scrape, searching web...")
 
-    # ── Phase 2: DDG web search for stores still missing ──
+    # ── Phase 2: DDG web search for real prices ──
     remaining = [s for s in stores if s not in found]
     if remaining:
-        bar.progress(55, text=f"Searching web for {len(remaining)} remaining stores...")
         ddg_prices = ddg_find_store_prices(query, remaining)
         for store_name, data in ddg_prices.items():
             price = data.get("price")
@@ -738,11 +726,79 @@ def fetch_prices(product: dict, user_city: str = None) -> list:
                     "source": data.get("source", "web search"),
                 }
 
-    bar.progress(100, text=f"Done! Found real prices at {len(found)} stores.")
+    bar.progress(65, text=f"Found {len(found)} prices, analyzing web data...")
+
+    # ── Phase 3: AI reads REAL web snippets to extract prices ──
+    # This is NOT AI guessing — it reads actual web search results and extracts prices.
+    remaining2 = [s for s in stores if s not in found]
+    if remaining2 and client:
+        try:
+            # Collect all web snippets we gathered during DDG searches
+            all_snippets = []
+            broad_results = _ddg_search(f"{query} price compare India", max_results=12)
+            for r in broad_results:
+                snippet = f"{r.get('title', '')} | {r.get('snippet', '')} | {r.get('link', '')}"
+                all_snippets.append(snippet)
+
+            if all_snippets:
+                snippets_text = "\n".join(f"  {i+1}. {s[:300]}" for i, s in enumerate(all_snippets[:12]))
+                stores_needed = ", ".join(remaining2)
+
+                prompt = f"""Read these REAL web search results and extract prices for the product.
+
+PRODUCT: "{product_name}"
+
+REAL WEB SEARCH RESULTS:
+{snippets_text}
+
+EXTRACT prices for these stores: {stores_needed}
+
+RULES:
+1. ONLY extract prices that are explicitly mentioned in the web results above
+2. Do NOT make up or guess any prices
+3. If a store's price is not mentioned in any result, set it to null
+4. Match prices to the correct store (Amazon, Flipkart, Croma, etc.)
+5. Prices must be in INR
+
+Return ONLY a JSON array:
+[{{"store": "StoreName", "price": 25000}}, {{"store": "Store2", "price": null}}]"""
+
+                raw = ai_call(client, [{"role": "user", "content": prompt}])
+                cleaned = re.sub(r'```(?:json)?\s*\n?', '', raw.strip()).strip()
+                cleaned = re.sub(r'<think>.*?</think>', '', cleaned, flags=re.DOTALL).strip()
+                m = re.search(r'\[.*\]', cleaned, re.DOTALL)
+                if m:
+                    store_data = json.loads(m.group(0))
+                    for item in store_data:
+                        sname = item.get("store", "")
+                        price = item.get("price")
+                        matched = None
+                        for cs in stores:
+                            if cs.lower() in sname.lower() or sname.lower() in cs.lower():
+                                matched = cs
+                                break
+                        if not matched or matched in found:
+                            continue
+                        if price is not None:
+                            try:
+                                price = float(price)
+                                if lo <= price <= hi:
+                                    found[matched] = {
+                                        "site": matched,
+                                        "link": STORE_SEARCH_URLS[matched](query),
+                                        "price": price,
+                                        "source": "web search results",
+                                    }
+                            except (ValueError, TypeError):
+                                pass
+        except Exception:
+            pass
+
+    bar.progress(100, text=f"Done! Found prices at {len(found)} stores.")
     time.sleep(0.4)
     bar.empty()
 
-    # ── Build results: stores with real price first, then "visit store" ──
+    # ── Build results ──
     for store in stores:
         if store not in found:
             found[store] = {
@@ -764,6 +820,9 @@ def result_card(item: dict, rank: int, has_price_above: bool):
     link = item.get("link", "#")
     source = item.get("source", "")
 
+    # Escape & in URLs so HTML doesn't break
+    safe_link = link.replace("&", "&amp;")
+
     try:
         display_domain = urllib.parse.urlparse(link).netloc.replace("www.", "")
     except Exception:
@@ -773,28 +832,28 @@ def result_card(item: dict, rank: int, has_price_above: bool):
         price_html = f'Rs. {price_val:,.0f}'
         best = '<span class="ph-best">BEST PRICE</span>' if rank == 1 and has_price_above else ""
         source_html = f'<div class="ph-source">Price from {source}</div>' if source else ""
-        btn_class = "ph-buy"
-        btn_text = "Buy Now &rarr;"
+        btn_html = f'<a href="{safe_link}" target="_blank" rel="noopener noreferrer" class="ph-buy">Buy Now &#8594;</a>'
     else:
-        price_html = '<span style="font-size:0.9rem;color:#b8a99a;font-weight:500;">Could not fetch price</span>'
+        price_html = '<span style="font-size:0.9rem;color:#b8a99a;font-weight:500;">Price not found</span>'
         best = ""
         source_html = ""
-        btn_class = "ph-visit"
-        btn_text = "Visit Store &rarr;"
+        btn_html = f'<a href="{safe_link}" target="_blank" rel="noopener noreferrer" class="ph-visit">Visit Store &#8594;</a>'
 
-    st.markdown(f"""
-<div class="ph-card rank-{rank}">
-  <div class="ph-card-inner">
-    <div class="ph-rank">#{rank}</div>
-    <div class="ph-info">
-      <div class="ph-store">{item['site']}{best}</div>
-      <div class="ph-link">🔗 {display_domain}</div>
-      <div class="ph-price">{price_html}</div>
-      {source_html}
-    </div>
-    <a href="{link}" target="_blank" rel="noopener noreferrer" class="{btn_class}">{btn_text}</a>
-  </div>
-</div>""", unsafe_allow_html=True)
+    card_html = (
+        f'<div class="ph-card rank-{rank}">'
+        f'<div class="ph-card-inner">'
+        f'<div class="ph-rank">#{rank}</div>'
+        f'<div class="ph-info">'
+        f'<div class="ph-store">{item["site"]}{best}</div>'
+        f'<div class="ph-link">&#128279; {display_domain}</div>'
+        f'<div class="ph-price">{price_html}</div>'
+        f'{source_html}'
+        f'</div>'
+        f'{btn_html}'
+        f'</div>'
+        f'</div>'
+    )
+    st.markdown(card_html, unsafe_allow_html=True)
 
 
 # ── Main App ──────────────────────────────────────────────────────────────────
@@ -817,10 +876,10 @@ def main():
 })();
 </script>""", unsafe_allow_html=True)
 
-    st.markdown('<div class="ph-title">🛒 PriceHunt</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ph-title">&#128722; PriceHunt</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="ph-subtitle">Type a product or upload a photo '
-        '&rarr; compare prices across Indian stores instantly</div>',
+        '&#8594; compare prices across Indian stores instantly</div>',
         unsafe_allow_html=True
     )
 
@@ -1042,7 +1101,7 @@ def main():
 
     # ── Fetch REAL prices ──
     st.markdown('<div class="ph-section">Price Comparison &mdash; Cheapest First</div>', unsafe_allow_html=True)
-    results = fetch_prices(product, user_city=user_city)
+    results = fetch_prices(product, client=client, user_city=user_city)
 
     if not results:
         st.warning("Could not fetch prices. Browse stores directly:")
